@@ -27,6 +27,21 @@ case "$ADMIN_OUT" in
         ;;
 esac
 
+# guacd's loopback TLS pair: use the one mounted or made on an earlier
+# start; otherwise make this container's own. Never one baked into the image.
+TLS_DIR=/opt/rustguac/tls
+if [ ! -s "$TLS_DIR/cert.pem" ] || [ ! -s "$TLS_DIR/key.pem" ]; then
+    if [ -w "$TLS_DIR" ]; then
+        echo "No guacd TLS pair in $TLS_DIR: generating one for this container."
+        /opt/rustguac/bin/rustguac generate-cert --hostname localhost --out-dir "$TLS_DIR"
+        chmod 600 "$TLS_DIR/key.pem"
+    else
+        echo "ERROR: no guacd TLS pair in $TLS_DIR (cert.pem, key.pem) and it is not writable."
+        echo "Mount a pair there (e.g. -v ./tls/guacd:$TLS_DIR:ro) or make it writable."
+        exit 1
+    fi
+fi
+
 # Start guacd in background
 echo "Starting guacd..."
 LD_LIBRARY_PATH=/opt/rustguac/lib FREERDP_ADDIN_PATH=/opt/rustguac/lib/freerdp3 \

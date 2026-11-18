@@ -6,7 +6,7 @@ import { test, expect } from '@playwright/test';
 import { installApi, settle } from '../lib/api.mjs';
 
 const PAGES = ['/connections.html', '/sessions.html', '/recordings.html', '/reports.html'];
-const ALL = ['Connections', 'Sessions', 'Recordings', 'Reports', 'Docs', 'Tokens', 'Admin'];
+const ALL = ['Connections', 'Dashboard', 'Sessions', 'Recordings', 'Reports', 'Docs', 'Tokens', 'Admin'];
 
 async function visibleNav(page) {
     return page.locator('nav a:visible').evaluateAll(as => as.map(a => a.textContent.trim()).filter(t => /^[A-Z][a-z]+$/.test(t)));
@@ -31,7 +31,7 @@ test('a viewer sees no gated links', async ({ page }) => {
     await settle(page);
     await expect(page.locator('html')).toHaveAttribute('data-role-level', '1');
     const links = await visibleNav(page);
-    for (const gated of ['Sessions', 'Reports', 'Tokens', 'Admin']) expect(links).not.toContain(gated);
+    for (const gated of ['Dashboard', 'Sessions', 'Reports', 'Tokens', 'Admin']) expect(links).not.toContain(gated);
     expect(links).toContain('Connections');
     expect(links).toContain('Recordings');
 });
@@ -43,5 +43,6 @@ test('an operator sees Tokens but not Sessions, Reports or Admin', async ({ page
     await expect(page.locator('html')).toHaveAttribute('data-role-level', '2');
     const links = await visibleNav(page);
     expect(links).toContain('Tokens');
+    expect(links).toContain('Dashboard');
     for (const gated of ['Sessions', 'Reports', 'Admin']) expect(links).not.toContain(gated);
 });

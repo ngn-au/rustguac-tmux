@@ -11,6 +11,7 @@ const DOC_FILES: &[&str] = &[
     "credential-variables.md",
     "reports.md",
     "rdp-video-performance.md",
+    "tmux-workspace.md",
     "web-sessions.md",
     "vdi.md",
     "spice-and-proxmox.md",

@@ -207,6 +207,24 @@ Vendored as the diff of the PR branch against its merge-base with our pinned gua
 
 **Files patched:** `src/protocols/spice/auth.c`, `src/protocols/spice/settings.{c,h}`.
 
+## 012-terminal-mouse-reporting.patch
+
+**Bug:** guacd's terminal emulator implements none of xterm's mouse reporting modes. When an application asks for the mouse (tmux passing on a pane running Claude Code, which sets `DECSET 1003` and `1006`; also vim, htop, less with mouse on), guacd ignores the request. The wheel then scrolls guacd's own scrollback, which holds nothing useful while the application is on the alternate screen. So Claude Code's transcript can't be scrolled in a rustguac session, while it can in any xterm-compatible terminal.
+
+**Fix:** `DECSET/DECRST 1000` (buttons), `1002` (also motion with a button held), `1003` (all motion) and `1006` (SGR encoding) are tracked as terminal flags. While any of 1000/1002/1003 is set and Shift is not held, mouse input goes to the application as xterm reports (`ESC [ < b ; col ; row M/m`, or classic `ESC [ M` bytes without 1006): presses and releases of the three buttons, the wheel as a press of button 64/65, and motion to another cell as the mode asks. Selection, paste-on-right-click and local scrolling are skipped in that case. Shift keeps guacd's own behaviour, as in xterm, so text can still be selected and copied. Set/Reset Mode now applies every parameter of the sequence (`ESC [ ? 1000 ; 1006 h`), not only the first.
+
+**Files patched:** `src/terminal/terminal.c`, `src/terminal/terminal-handlers.c`, `src/terminal/terminal/terminal-priv.h`.
+
+## 013-terminal-osc52-right-paste.patch
+
+**Bug:** copying didn't work in the console for programs that copy with OSC 52 (`ESC ] 52 ; c ; <base64> BEL`): Claude Code's own selection, tmux copy mode, vim. guacd's terminal ignored OSC 52, so the text never reached the browser's clipboard. Separately, after patch 012, a right click in a program with mouse tracking on went to the program instead of pasting.
+
+**Fix:**
+- OSC 52 is handled. The base64 text after the targets is decoded into the terminal's clipboard and sent to the connected users, as a selection is. The client then puts it on the system clipboard, and Cmd+C writes it inside a key press for Safari. A query (`?`) is not answered.
+- The right button is not reported to the program, so right-click keeps pasting locally.
+
+**Files patched:** `src/terminal/terminal-handlers.c`, `src/terminal/terminal/terminal-handlers.h`, `src/terminal/terminal.c`.
+
 ## Applying patches
 
 Patches are applied automatically by all build scripts (`build-deb.sh`, `build-rpm.sh`, `install.sh`, `dev.sh`, `Dockerfile`). To apply manually:

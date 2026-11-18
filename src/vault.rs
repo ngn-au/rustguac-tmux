@@ -55,7 +55,7 @@ impl From<reqwest::Error> for VaultError {
 // ── Data types ──
 
 /// Folder access configuration stored at `<folder>/.config` in Vault.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct FolderConfig {
     pub allowed_groups: Vec<String>,
     /// Users granted access by login email, in addition to `allowed_groups`.
@@ -439,6 +439,11 @@ pub struct AddressBookEntry {
     /// reappear when the pointer nears the left edge of the display.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub autohide_side_tabs: Option<bool>,
+    /// SSH: offer named tmux sessions on the host (#325). Connect can then
+    /// attach to one by name, creating it if needed, and the Connections
+    /// page lists the host's sessions on demand. See `crate::tmux`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tmux: Option<bool>,
     /// SPICE: connect using TLS.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spice_tls: Option<bool>,
@@ -681,6 +686,9 @@ pub struct EntryInfo {
     /// Auto-hide the clipboard/files side tabs when idle.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub autohide_side_tabs: Option<bool>,
+    /// SSH: named tmux sessions are offered (#325).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tmux: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub spice_tls: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -829,6 +837,7 @@ impl From<(&str, &AddressBookEntry)> for EntryInfo {
             auto_open_if_singleton: e.auto_open_if_singleton,
             fullscreen_on_connect: e.fullscreen_on_connect,
             autohide_side_tabs: e.autohide_side_tabs,
+            tmux: e.tmux,
             spice_tls: e.spice_tls,
             spice_tls_port: e.spice_tls_port,
             spice_ca_cert: e.spice_ca_cert.clone(),

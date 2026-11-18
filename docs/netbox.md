@@ -16,6 +16,7 @@ Go to **Customization > Custom Fields** and create the following fields. Assign 
 | `remote_port` | Integer | — | Port override for `remote_protocol` (leave blank for protocol default) |
 | `remote_protocols` | Multiple selection: `ssh`, `rdp`, `vnc`, `web` | — | Optional. More protocols for a synced entry, besides `remote_protocol` (see [Multi-protocol entries](#multi-protocol-entries)) |
 | `remote_ports` | JSON | — | Optional. Ports for protocols that do not use the standard one, e.g. `{"ssh": 2222, "web": 8443}` |
+| `remote_tmux` | Boolean | false | Optional. Offer [tmux sessions](#tmux-sessions) on the device's SSH protocol |
 
 The `console_enabled` field is the master switch — no links appear until it's checked. The `console_mode` field controls which link is shown:
 
@@ -195,7 +196,8 @@ An entry can offer several ways into one device, for example RDP, SSH and its we
 {%- macro proto(p, port) -%}
 {"type": "{{ p }}"
 {%- if p == 'web' %}, "url": "https://{{ ip }}{% if port %}:{{ port }}{% endif %}/"
-{%- elif port %}, "port": {{ port }}{% endif %}}
+{%- elif port %}, "port": {{ port }}{% endif %}
+{%- if p == 'ssh' and data.custom_fields.remote_tmux %}, "tmux": true{% endif %}}
 {%- endmacro -%}
 {
   "hostname": "{{ ip }}",
@@ -233,6 +235,14 @@ For a device with `remote_protocol: rdp`, `remote_protocols: [ssh, web]` and `re
 - The body is the whole list of protocols: a protocol added to a synced entry by hand in rustguac is removed on the device's next sync. Add it in NetBox instead (`remote_protocols`).
 - The single-protocol template above keeps working unchanged. It is the same as a one-item `protocols` list.
 - Every rustguac instance that shares the Vault must be on a version that knows multi-protocol entries before any device gets a second protocol: older versions cannot read such an entry and leave it out (see [Migration](migration.md)).
+
+### tmux sessions
+
+Tick `remote_tmux` on a device and its SSH protocol is synced with `"tmux": true`. In rustguac, that entry's Connect menu then lists the tmux sessions running on the device and opens them in the tmux workspace, where a closed browser or a dropped connection only detaches: the shell keeps running on the device (see [tmux sessions](overview.md#tmux-sessions)). Untick it and the next sync turns it off.
+
+With tags instead of custom fields, the same works from a tag, e.g. `{%- if p == 'ssh' and 'tmux' in data.tags | map(attribute='slug') %}, "tmux": true{% endif %}`.
+
+Listing the sessions logs in with the entry's stored credentials (its own, or the folder's defaults). With `"prompt_credentials": true`, as in the template above, there is nothing to log in with: the menu still opens a session by name, but cannot list them, and **Advanced** (starting sessions with startup commands) is not offered.
 
 ### Create webhook: device deleted
 

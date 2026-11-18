@@ -95,6 +95,11 @@ pub struct CreateSessionRequest {
     /// Name of the entry protocol (#296); set by the API for an entry.
     #[serde(default)]
     pub address_book_protocol: Option<String>,
+    /// SSH: attach to this named tmux session on the host instead of
+    /// opening a login shell, creating it if it does not exist (#325).
+    /// Checked with `crate::tmux::valid_name`.
+    #[serde(default)]
+    pub tmux_session: Option<String>,
     /// Display name of the address book entry (for reporting).
     pub entry_display_name: Option<String>,
     /// Per-entry max recordings to keep.
@@ -413,6 +418,10 @@ pub struct SessionInfo {
     /// entries with more than one way in (`ssh`, `rdp`, `ssh-2222`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub address_book_protocol: Option<String>,
+    /// The tmux session an SSH session is attached to (#325). Read by
+    /// client.html to reconnect to the same one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tmux_session: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub entry_display_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -469,6 +478,8 @@ pub struct Session {
     pub address_book_folder: Option<String>,
     /// Name of the entry protocol the session uses (#296).
     pub address_book_protocol: Option<String>,
+    /// The tmux session it is attached to (#325).
+    pub tmux_session: Option<String>,
     /// Display name of the address book entry (for reporting).
     pub entry_display_name: Option<String>,
     /// Per-entry max recordings to keep (from address book entry).
@@ -862,6 +873,7 @@ impl Session {
             address_book_entry: self.address_book_entry.clone(),
             address_book_folder: self.address_book_folder.clone(),
             address_book_protocol: self.address_book_protocol.clone(),
+            tmux_session: self.tmux_session.clone(),
             entry_display_name: self.entry_display_name.clone(),
             thumbnail_url: Some(format!("/api/sessions/{}/thumbnail", self.id)),
             fullscreen_on_connect: self.fullscreen_on_connect,
@@ -989,6 +1001,21 @@ impl SessionManager {
     ) -> Result<SessionInfo, SessionError> {
         // Taken before any field of the request is moved out below.
         let reuse_fingerprint = req.reuse_fingerprint();
+
+        // A tmux session (#325) is for SSH only, and its name ends up in the
+        // command guacd runs on the host, so it must pass the name check.
+        let tmux_command = match req.tmux_session.as_deref() {
+            None => None,
+            Some(_) if !matches!(req.session_type, SessionType::Ssh) => {
+                return Err(SessionError::ValidationError(
+                    "a tmux session needs an SSH connection".into(),
+                ))
+            }
+            Some(name) => Some(
+                crate::tmux::attach_command(name)
+                    .ok_or_else(|| SessionError::ValidationError(crate::tmux::name_error()))?,
+            ),
+        };
 
         // Enforce session limits (only count active/pending sessions)
         {
@@ -1224,6 +1251,7 @@ impl SessionManager {
                     font_size: req
                         .ssh_font_size
                         .map(|s| s.clamp(MIN_SSH_FONT, MAX_SSH_FONT)),
+                    command: tmux_command.clone(),
                     wol: wol.clone(),
                 });
                 (
@@ -2148,6 +2176,7 @@ impl SessionManager {
             address_book_entry: req.address_book_entry,
             address_book_folder: req.address_book_folder,
             address_book_protocol: req.address_book_protocol,
+            tmux_session: req.tmux_session,
             entry_display_name: req.entry_display_name,
             max_recordings: req.max_recordings,
             login_script_handle,
@@ -3505,6 +3534,7 @@ mod tests {
             address_book_entry: None,
             address_book_folder: None,
             address_book_protocol: None,
+            tmux_session: None,
             entry_display_name: None,
             max_recordings: None,
             login_script_handle: None,
@@ -4069,6 +4099,30 @@ mod tests {
             .unwrap()
             .extend(extra.as_object().unwrap().clone());
         serde_json::from_value(body).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_tmux_session_is_ssh_only_and_its_name_is_checked() {
+        let mgr = new_manager_for_tests();
+        let err = |r: Result<SessionInfo, SessionError>| match r {
+            Err(SessionError::ValidationError(m)) => m,
+            other => panic!(
+                "expected a validation error, got {:?}",
+                other.map(|i| i.session_id)
+            ),
+        };
+        let rdp = entry_request(serde_json::json!({ "tmux_session": "deploy" }));
+        assert!(err(mgr.create_session(rdp, "alice".into()).await).contains("SSH"));
+        for bad in ["a;reboot", "$(id)", "", "a b", "it's"] {
+            let ssh = entry_request(serde_json::json!({
+                "session_type": "ssh", "hostname": "ssh.example.test", "port": 22,
+                "tmux_session": bad,
+            }));
+            assert!(
+                err(mgr.create_session(ssh, "alice".into()).await).contains("tmux session names"),
+                "{bad:?}"
+            );
+        }
     }
 
     /// A Pending session as `create_session` leaves it for an entry connect:

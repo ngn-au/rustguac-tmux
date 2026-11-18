@@ -348,7 +348,12 @@
         // An explicitly windowed session: no fullscreen-on-connect, whatever
         // the entry says, so no cover asking for a click.
         var windowed = urlParams.get('fs') === '0';
-        function rgNotifyParent(kind) { if (!embedded) return; try { window.parent.postMessage({ rgSession: kind }, location.origin); } catch (e) {} }
+        function rgNotifyParent(kind, extra) {
+            if (!embedded) return;
+            var msg = { rgSession: kind };
+            if (extra) for (var k in extra) msg[k] = extra[k];
+            try { window.parent.postMessage(msg, location.origin); } catch (e) {}
+        }
         // Every navigation away from the session goes through here. Embedded,
         // it moves the whole tab: the frame may only hold this session's
         // client, and any other page refuses to load in a frame.
@@ -366,6 +371,12 @@
         var viewportSettled = !embedded;
         var _onViewportSettled = [];
         function rgWhenViewportSettled(fn) { if (viewportSettled) fn(); else _onViewportSettled.push(fn); }
+        // Whether the display may take the focus: not from a field the user
+        // is in (the clipboard or file panel, still showing).
+        function rgDisplayShouldTakeFocus(active, body, display) {
+            if (!active || active === body || active === display) return true;
+            return active.offsetParent === null;
+        }
         function rgMarkViewportSettled() {
             if (viewportSettled) return;
             viewportSettled = true;
@@ -387,6 +398,7 @@
         var entryDisplayName = '';
         var wantFullscreen = false;
         var bitmapSession = false;   // rdp/vnc: a server-side resize is slow and visible
+        var terminalSession = false; // ssh: guacd's own terminal (Mac editing keys)
         var fsEverEntered = false;   // after the first fullscreen, size to the window again
         // #257: the launcher adds ?fs=1 for a fullscreen-on-connect entry. We
         // request fullscreen immediately, here, before the async session fetch
@@ -504,12 +516,14 @@
                         entry_key: session.address_book_entry,
                         folder: session.address_book_folder || '',
                         display_name: session.entry_display_name || '',
-                        protocol: session.address_book_protocol || ''
+                        protocol: session.address_book_protocol || '',
+                        tmux_session: session.tmux_session || ''
                     };
                 }
                 if (session && session.entry_display_name) entryDisplayName = session.entry_display_name;
                 if (session && session.fullscreen_on_connect && !embedded && !windowed) wantFullscreen = true;
                 bitmapSession = !!(session && (session.session_type === 'rdp' || session.session_type === 'vnc'));
+                terminalSession = !!(session && session.session_type === 'ssh');
                 if (session && session.autohide_side_tabs) wantAutohideTabs = true;
                 return showBanner(session.banner);
             })
@@ -524,9 +538,44 @@
 
             var tunnel = new Guacamole.WebSocketTunnel(wsUrl);
             var client = new Guacamole.Client(tunnel);
+            rgKeepTunnelWhileHidden(tunnel, document, window);
             // Expose for console debugging
             window.__guac_client = client;
             setupClient(client, tunnel);
+        }
+
+        // The tunnel closes itself ("Server timeout") when no message is read
+        // for 15 seconds. guacd sends one at least every 5 seconds, so a live
+        // connection never trips it, except in a background tab: its timers
+        // are throttled and Safari freezes it outright, and when it thaws the
+        // overdue timeout can run before the messages that arrived meanwhile
+        // are read, closing a live session (#331). While the page is hidden
+        // the timeout is held off; a browser that has really gone is ended by
+        // rustguac's proxy instead, and a closed socket still closes the
+        // tunnel. Back in view, a session that hears nothing for the usual 15
+        // seconds is closed as it would have been.
+        var RG_HIDDEN_RECEIVE_TIMEOUT = 24 * 3600 * 1000;
+        function rgKeepTunnelWhileHidden(tunnel, doc, win) {
+            var visibleTimeout = tunnel.receiveTimeout;
+            var lastHeard = Date.now();
+            var onInstruction = tunnel.oninstruction;
+            tunnel.oninstruction = function() {
+                lastHeard = Date.now();
+                if (onInstruction) return onInstruction.apply(this, arguments);
+            };
+            // The tunnel arms its timeout with the current value on every
+            // message, so a change applies from guacd's next keepalive.
+            function apply() {
+                if (doc.hidden) { tunnel.receiveTimeout = RG_HIDDEN_RECEIVE_TIMEOUT; return; }
+                tunnel.receiveTimeout = visibleTimeout;
+                var shownAt = Date.now();
+                win.setTimeout(function() {
+                    if (doc.hidden || lastHeard >= shownAt || tunnel.state === Guacamole.Tunnel.State.CLOSED) return;
+                    tunnel.disconnect();
+                }, visibleTimeout);
+            }
+            doc.addEventListener('visibilitychange', apply);
+            if (doc.hidden) tunnel.receiveTimeout = RG_HIDDEN_RECEIVE_TIMEOUT;
         }
 
         function startGuacamole() {
@@ -861,7 +910,12 @@
             }
 
             // ── Auto-sync clipboard on window focus ──
+            // Not when embedded: the parent page focuses the frame itself
+            // (the tmux workspace on every tab switch), with no gesture in
+            // the frame, and Safari answers a clipboard read without one
+            // with its Paste prompt. Ctrl/Cmd+V below still syncs on paste.
             window.addEventListener('focus', function() {
+                if (embedded) return;
                 if (!panelOpen && navigator.clipboard && navigator.clipboard.readText) {
                     navigator.clipboard.readText().then(function(text) {
                         if (text && text !== remoteClipboard) {
@@ -914,6 +968,58 @@
                 scaleDisplay();
             }
 
+            // ── Mac editing keys in terminals ──
+            // guacd's terminal sends Cmd/Option + arrow as xterm modifier
+            // sequences (ESC [1;9D) that shells, tmux and Claude Code ignore,
+            // so a Mac user's Cmd+Left does nothing. What a Mac terminal app
+            // does instead, for an SSH session: Cmd+Left/Right = start/end of
+            // line (Ctrl-A / Ctrl-E), Option+Left/Right = word back/forward
+            // (Esc b / Esc f), Cmd+Backspace = delete to line start (Ctrl-U),
+            // Option+Backspace = delete word (Ctrl-W). Cmd+V (paste) and
+            // selection (copy) are guacd's own and stay as they are.
+            //
+            // The keys to send for a keydown, or null to leave it alone.
+            // `lift`: the held modifier ('meta' or 'alt') to release on the
+            // remote first and press again after, so it doesn't change what
+            // the keys mean; Option+arrow keeps Alt held, as Alt+b is Esc b.
+            // `keys`: combos to tap in order, each pressed together then
+            // released (so [[ESC], [b]] is Esc then b). `lift`: the held
+            // modifier ('meta', 'alt' or 'shift') to release on the remote
+            // first and press again after, so it doesn't change the keys.
+            // Option on a Mac reaches guacd as AltGr, which it does not read
+            // as Alt, so Option+arrow sends an explicit Esc rather than
+            // relying on Alt being held.
+            function rgTermKeyAction(e) {
+                var CTRL = 0xFFE3, ESC = 0xFF1B, RETURN = 0xFF0D;
+                // Shift+Enter: a new line in Claude Code (Esc Return, its
+                // Meta+Enter), rather than sending the message.
+                if (e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey && e.key === 'Enter')
+                    return { lift: 'shift', keys: [[ESC], [RETURN]] };
+                if (e.ctrlKey || e.shiftKey || (e.metaKey && e.altKey)) return null;
+                if (e.metaKey) {
+                    if (e.key === 'ArrowLeft') return { lift: 'meta', keys: [[CTRL, 0x61]] };   // Ctrl-A
+                    if (e.key === 'ArrowRight') return { lift: 'meta', keys: [[CTRL, 0x65]] };  // Ctrl-E
+                    if (e.key === 'Backspace') return { lift: 'meta', keys: [[CTRL, 0x75]] };   // Ctrl-U
+                } else if (e.altKey) {
+                    if (e.key === 'ArrowLeft') return { lift: 'alt', keys: [[ESC], [0x62]] };   // Esc b
+                    if (e.key === 'ArrowRight') return { lift: 'alt', keys: [[ESC], [0x66]] };  // Esc f
+                    if (e.key === 'Backspace') return { lift: 'alt', keys: [[CTRL, 0x77]] };    // Ctrl-W
+                }
+                return null;
+            }
+            function rgIsMac() {
+                var p = (navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || '';
+                return /mac|iphone|ipad/i.test(p);
+            }
+            // On by default in a Mac browser; the Controls panel turns it off
+            // (or on elsewhere), remembered in this browser.
+            var macKeys = rgIsMac();
+            try { var mk = localStorage.getItem('rustguac_mac_keys'); if (mk === '1' || mk === '0') macKeys = mk === '1'; } catch (e) {}
+            function rgSetMacKeys(on) {
+                macKeys = !!on;
+                try { localStorage.setItem('rustguac_mac_keys', macKeys ? '1' : '0'); } catch (e) {}
+            }
+
             // Press each keysym in order, then release in reverse. Used for
             // combos the browser/OS would otherwise intercept (Ctrl+Alt+Del).
             function sendKeyCombo(keys) {
@@ -950,6 +1056,8 @@
                         '<div style="color:var(--text-muted);font-size:0.85em;margin-bottom:0.5em;letter-spacing:0.05em;">KEYBOARD</div>' +
                         '<label style="display:flex;align-items:center;gap:0.5em;padding:0.25em 0;font-size:0.9em;cursor:pointer;"><input type="checkbox" id="ctrl-lock-keys"><span>Lock all keys in fullscreen</span></label>' +
                         '<div id="ctrl-lock-keys-hint" style="color:var(--text-dim);font-size:0.75em;margin-top:0.4em;">In fullscreen, Win, Alt+Tab and other shortcuts go to the remote desktop instead of this computer. Hold Esc to leave fullscreen.</div>' +
+                        '<label style="display:flex;align-items:center;gap:0.5em;padding:0.25em 0;margin-top:0.5em;font-size:0.9em;cursor:pointer;"><input type="checkbox" id="ctrl-mac-keys"><span>Mac editing keys in terminals</span></label>' +
+                        '<div style="color:var(--text-dim);font-size:0.75em;margin-top:0.4em;">SSH only. Cmd+Left/Right: start/end of line. Option+Left/Right: word back/forward. Cmd/Option+Backspace: delete line/word. Shift+Enter: new line (Claude). Cmd+V pastes straight in. Cmd+C copies the last selection (Shift+drag, or a copy in tmux or Claude).</div>' +
                     '</div>' +
                     '<div style="padding:0.8em 1em;border-top:1px solid var(--border);">' +
                         '<div style="color:var(--text-muted);font-size:0.85em;margin-bottom:0.5em;letter-spacing:0.05em;">VIEW</div>' +
@@ -979,6 +1087,9 @@
                     document.getElementById('ctrl-lock-keys-hint').textContent = 'This browser can\'t capture system shortcuts. Chrome and Edge can.';
                 }
                 lockKeys.addEventListener('change', function() { rgSetLockAllKeys(lockKeys.checked); });
+                var macKeysBox = document.getElementById('ctrl-mac-keys');
+                macKeysBox.checked = macKeys;
+                macKeysBox.addEventListener('change', function() { rgSetMacKeys(macKeysBox.checked); });
                 document.getElementById('ctrl-view-' + viewMode).checked = true;
                 ['fit', 'actual'].forEach(function(m) {
                     document.getElementById('ctrl-view-' + m).addEventListener('change', function(e) {
@@ -1933,6 +2044,7 @@
                         }
                         break;
                     case Guacamole.Client.State.DISCONNECTED:
+                        endedCleanly = true;
                         statusEl.textContent = 'Disconnected'; statusEl.className = '';
                         rgDisarmFullscreenGesture(); rgHideConnectCover();
                         if (_thumbInterval) { clearInterval(_thumbInterval); _thumbInterval = null; }
@@ -1947,6 +2059,11 @@
             };
 
             client.onerror = function(status) {
+                // Embedded: the parent decides what a lost connection means
+                // (the tmux workspace reconnects the tab; the fullscreen
+                // launcher leaves the overlay below to the user).
+                rgNotifyParent('lost', { code: status && status.code, message: status && status.message });
+                if (rgTmuxAutoReconnect(status)) return;
                 statusEl.textContent = 'Error: ' + (status.message || 'Unknown error');
                 statusEl.className = '';
                 rgDisarmFullscreenGesture(); rgHideConnectCover();
@@ -2012,6 +2129,7 @@
             // transitioned to Completed the moment the WebSocket closed.
             document.getElementById('btn-reconnect').addEventListener('click', function() {
                 var btn = this;
+                clearTimeout(tmuxTimer); clearInterval(tmuxTick); tmuxTimer = null;
                 btn.disabled = true;
                 btn.textContent = 'Reconnecting...';
 
@@ -2058,20 +2176,46 @@
                         try { return localStorage.getItem('rustguac_keyboard_layout') || undefined; } catch (e) { return undefined; }
                     })()
                 };
-                // Reconnect with the protocol the session used (#296).
+                // Reconnect with the protocol the session used (#296), and to
+                // the same tmux session (#325).
                 if (relaunchInfo.protocol) body.protocol = relaunchInfo.protocol;
+                if (relaunchInfo.tmux_session) body.tmux_session = relaunchInfo.tmux_session;
 
                 var url = '/api/addressbook/folders/' + encodeURIComponent(scope)
                     + '/' + encodeURIComponent(folder)
                     + '/entries/' + encodeURIComponent(entry) + '/connect';
 
-                fetch(url, {
-                    method: 'POST',
-                    headers: headers,
-                    credentials: 'same-origin',
-                    body: JSON.stringify(body)
+                // A tmux reconnect ends this page's old session first: after
+                // a network drop it may not have ended yet, and each attempt
+                // makes a new one, which would otherwise count against the
+                // session limit until it timed out. Ending it only detaches
+                // from tmux. Waits a few seconds at most.
+                var before = Promise.resolve();
+                if (relaunchInfo.tmux_session && sessionId) {
+                    var ending = fetch('/api/sessions/' + encodeURIComponent(sessionId), {
+                        method: 'DELETE', headers: headers, credentials: 'same-origin'
+                    }).catch(function() {});
+                    before = Promise.race([ending, new Promise(function(r) { setTimeout(r, 3000); })]);
+                }
+                before.then(function() {
+                    return fetch(url, {
+                        method: 'POST',
+                        headers: headers,
+                        credentials: 'same-origin',
+                        body: JSON.stringify(body)
+                    });
                 })
                 .then(function(res) {
+                    // A tmux session waits out a server that is restarting
+                    // or unreachable behind a proxy, as it does the network,
+                    // and the session limit while older sessions end.
+                    if (relaunchInfo.tmux_session && (res.status >= 500 || res.status === 429)) { rgTmuxRetryLater(btn); return; }
+                    if (relaunchInfo.tmux_session && res.status === 400) {
+                        return res.clone().json().catch(function() { return {}; }).then(function(j) {
+                            if (/maximum (concurrent )?sessions/i.test(j.error || '')) { rgTmuxRetryLater(btn); return; }
+                            rgGo('/connections.html');
+                        });
+                    }
                     if (!res.ok) {
                         // 412 missing creds, 403 forbidden, 404 entry gone:
                         // none of those are fixable from this page. Punt to
@@ -2093,15 +2237,88 @@
                     });
                 })
                 .catch(function() {
+                    // Offline: a tmux session keeps trying, it is still
+                    // there on the host.
+                    if (relaunchInfo.tmux_session) { rgTmuxRetryLater(btn); return; }
                     rgGo('/connections.html');
                 });
+            });
+
+            // ── tmux sessions (#325): reconnect on their own ──
+            // The shell lives in tmux on the host, so a lost connection (the
+            // network dropped, the laptop slept, the server restarted) loses
+            // nothing: reconnect to the same tmux session, backing off while
+            // it keeps failing and trying at once when the browser is back
+            // online. A session that ended cleanly (tmux exited, detached,
+            // or was killed) is left to the Reconnect button.
+            var TMUX_BACKOFF = [1, 2, 4, 8, 15, 30];
+            var endedCleanly = false;
+            var tmuxAttempt = 0, tmuxTimer = null, tmuxTick = null;
+            // Guacamole status codes worth retrying: the tunnel's own 519
+            // and the upstream/server family. Not the client ones (0x03xx:
+            // refused, unauthorized, forbidden), which would only fail
+            // again, each time a real login on the host.
+            function rgTmuxRetryable(status) {
+                var c = status && status.code;
+                return c === 519 || (c >= 0x0200 && c < 0x0300) || !c;
+            }
+            function rgTmuxAutoReconnect(status) {
+                if (embedded || shareToken || !relaunchInfo || !relaunchInfo.tmux_session) return false;
+                // The tunnel closing after a clean end is not a lost connection.
+                if (endedCleanly) return false;
+                if (!rgTmuxRetryable(status)) return false;
+                rgDisarmFullscreenGesture(); rgHideConnectCover();
+                if (_thumbInterval) { clearInterval(_thumbInterval); _thumbInterval = null; }
+                rgTmuxRetryLater(document.getElementById('btn-reconnect'));
+                return true;
+            }
+            function rgTmuxRetryLater(btn) {
+                var wait = TMUX_BACKOFF[Math.min(tmuxAttempt, TMUX_BACKOFF.length - 1)];
+                tmuxAttempt++;
+                var title = document.getElementById('disconnected-title');
+                var msg = document.getElementById('disconnected-message');
+                title.textContent = 'Connection lost';
+                document.getElementById('disconnected-overlay').className = 'visible';
+                btn.disabled = false;
+                btn.textContent = 'Reconnect now';
+                var left = wait;
+                function show() {
+                    msg.textContent = (navigator.onLine === false ? 'Offline. ' : '')
+                        + 'Reconnecting to tmux session ' + relaunchInfo.tmux_session + ' in ' + left + 's\u2026'
+                        + ' It keeps running on the host.';
+                }
+                show();
+                clearInterval(tmuxTick); clearTimeout(tmuxTimer);
+                tmuxTick = setInterval(function() { left = Math.max(0, left - 1); show(); }, 1000);
+                tmuxTimer = setTimeout(function() { clearInterval(tmuxTick); btn.click(); }, wait * 1000);
+            }
+            window.addEventListener('online', function() {
+                if (!tmuxTimer || document.getElementById('disconnected-overlay').className !== 'visible') return;
+                clearTimeout(tmuxTimer); clearInterval(tmuxTick); tmuxTimer = null;
+                document.getElementById('btn-reconnect').click();
             });
 
             // ── Keyboard — attached to display so it doesn't steal from textarea ──
             displayEl.tabIndex = 0;
             displayEl.style.outline = 'none';
-            displayEl.focus();
+            // Embedded (a tab of the tmux workspace), the display never takes
+            // the focus by itself: a tab still connecting in the background
+            // would take the keyboard from the tab being typed in. The
+            // workspace asks for it, below, when it shows this frame.
+            if (!embedded) displayEl.focus();
             var keyboard = new Guacamole.Keyboard(displayEl);
+            // Embedded in the tmux workspace: it asks for the display to be
+            // focused whenever it shows this frame (a tab switch hides the
+            // pane, which takes the focus away), so typing goes to the
+            // session without a click first.
+            if (embedded) {
+                window.addEventListener('message', function(e) {
+                    if (e.origin !== location.origin || !e.data || e.data.rgLauncher !== 'focus') return;
+                    if (!rgDisplayShouldTakeFocus(document.activeElement, document.body, displayEl)) return;
+                    displayEl.focus();
+                    keyboard.reset();
+                });
+            }
             var lastToggleTime = 0;
 
             // Ctrl+Alt+Shift toggle on document (capture phase) — works everywhere
@@ -2122,6 +2339,9 @@
             // then sends key events. Firefox shows a one-time permission popup.
             var _pasteIntercepted = false;
             document.addEventListener('keydown', function(e) {
+                // A terminal with Mac keys on pastes straight into the session
+                // instead (rgDirectPaste, below).
+                if (macKeys && terminalSession && (e.metaKey || e.ctrlKey)) return;
                 if ((e.ctrlKey || e.metaKey) && (e.key === 'v' || e.key === 'V') && !e.altKey && !e.repeat && !panelOpen) {
                     if (navigator.clipboard && navigator.clipboard.readText) {
                         e.stopPropagation();
@@ -2146,6 +2366,205 @@
                     e.preventDefault();
                     _pasteIntercepted = false;
                 }
+            }, true);
+
+            // ── Mac editing keys: see rgTermKeyAction ──
+            // Capture on document, before Guacamole's handler on displayEl.
+            var META_SYMS = [0xFFE7, 0xFFE8, 0xFFEB, 0xFFEC], ALT_SYMS = [0xFFE9, 0xFFEA, 0xFE03, 0xFF7E];
+            var SHIFT_SYMS = [0xFFE1, 0xFFE2];
+            var swallowedKeyups = {};
+
+            // ── Cmd+V: paste straight into the terminal ──
+            // No Clipboard API prompt and no clipboard panel: the key press
+            // moves focus to a hidden field so the browser's own paste lands
+            // there, and the text goes to the session's input through guacd's
+            // STDIN stream. In a tmux session it is sent as a bracketed paste,
+            // so a multi-line paste is one paste (tmux passes the brackets on
+            // only to programs that asked for them, such as Claude Code).
+            var pasteSink = document.createElement('textarea');
+            pasteSink.setAttribute('aria-hidden', 'true');
+            pasteSink.tabIndex = -1;
+            pasteSink.style.cssText = 'position:fixed;left:-9999px;top:0;width:1px;height:1px;opacity:0;';
+            document.body.appendChild(pasteSink);
+            var pasteTimer = null;
+            function rgPasteText(text) {
+                if (!text || !client) return;
+                text = text.replace(/\r\n/g, '\r').replace(/\n/g, '\r');
+                if (relaunchInfo && relaunchInfo.tmux_session) text = '\x1b[200~' + text + '\x1b[201~';
+                var stream = client.createPipeStream('text/plain', 'STDIN');
+                var writer = new Guacamole.StringWriter(stream);
+                for (var i = 0; i < text.length; i += 4096) writer.sendText(text.substring(i, i + 4096));
+                writer.sendEnd();
+            }
+            function rgPasteDone() {
+                clearTimeout(pasteTimer); pasteTimer = null;
+                pasteSink.value = '';
+                displayEl.focus();
+                // The Cmd and V key-ups went to the hidden field: release
+                // whatever the remote still thinks is held.
+                keyboard.reset();
+            }
+            pasteSink.addEventListener('paste', function(e) {
+                e.preventDefault();
+                var cd = e.clipboardData;
+                var text = (cd && cd.getData('text/plain')) || '';
+                var files = cd && cd.files ? Array.prototype.slice.call(cd.files) : [];
+                rgPasteDone();
+                // An image (a screenshot copied, an image copied from a
+                // page) with no text: attach it, as Ctrl+V does.
+                if (!text && files.length) { rgSendFiles(files); return; }
+                rgPasteText(text);
+            });
+
+            // ── Images and files into the session ──
+            // Claude Code reads images from the host's clipboard, which in
+            // the console is not this computer's. So the file is saved on the
+            // host as the connection's login (POST .../upload) and its path
+            // is pasted into the terminal, as a terminal does for a file
+            // dragged onto it: Claude Code turns a pasted image path into an
+            // attachment ([Image #1]).
+            var MAX_UPLOAD = 32 * 1024 * 1024;
+            var toast = null, toastTimer = null;
+            function rgToast(msg, isErr) {
+                if (!toast) {
+                    toast = document.createElement('div');
+                    toast.setAttribute('role', 'status');
+                    toast.style.cssText = 'position:fixed;right:12px;bottom:12px;z-index:4000;max-width:min(420px,calc(100vw - 24px));padding:8px 12px;border-radius:6px;font:13px monospace;background:var(--surface);color:var(--text);border:1px solid var(--border);box-shadow:0 4px 18px rgba(0,0,0,.4);';
+                    document.body.appendChild(toast);
+                }
+                toast.textContent = msg;
+                toast.style.borderColor = isErr ? 'var(--status-error)' : 'var(--border)';
+                toast.style.display = '';
+                clearTimeout(toastTimer);
+                toastTimer = setTimeout(function() { toast.style.display = 'none'; }, isErr ? 6000 : 2500);
+            }
+            function rgUploadUrl(name) {
+                // relaunchInfo.entry_key is scope/folder.../entry.
+                var k = relaunchInfo && relaunchInfo.entry_key || '';
+                var first = k.indexOf('/'), last = k.lastIndexOf('/');
+                if (first < 0 || last <= first) return null;
+                var scope = k.slice(0, first), folder = k.slice(first + 1, last), entry = k.slice(last + 1);
+                return '/api/addressbook/folders/' + encodeURIComponent(scope) + '/' + encodeURIComponent(folder)
+                    + '/entries/' + encodeURIComponent(entry) + '/upload?name=' + encodeURIComponent(name)
+                    + (relaunchInfo.protocol ? '&protocol=' + encodeURIComponent(relaunchInfo.protocol) : '');
+            }
+            function rgFileName(f, i) {
+                if (f.name && f.name !== 'image.png') return f.name;
+                var ext = ({ 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp' })[f.type] || 'png';
+                var d = new Date(), p = function(n) { return (n < 10 ? '0' : '') + n; };
+                return 'pasted-' + d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate()) + '-' + p(d.getHours()) + p(d.getMinutes()) + p(d.getSeconds()) + (i ? '-' + i : '') + '.' + ext;
+            }
+            function rgSendFiles(files) {
+                files = files.filter(function(f) { return f && f.size >= 0; }).slice(0, 10);
+                if (!files.length) return;
+                if (!rgUploadUrl('x')) { rgToast('Files can be sent only into a saved connection.', true); return; }
+                var big = files.filter(function(f) { return f.size > MAX_UPLOAD; });
+                if (big.length) { rgToast(big[0].name + ' is over 32 MB.', true); return; }
+                rgToast(files.length === 1 ? 'Sending ' + rgFileName(files[0], 0) + '…' : 'Sending ' + files.length + ' files…');
+                var headers = {};
+                if (apiKey) headers['Authorization'] = 'Bearer ' + apiKey;
+                Promise.all(files.map(function(f, i) {
+                    return fetch(rgUploadUrl(rgFileName(f, i)), { method: 'POST', credentials: 'same-origin', headers: headers, body: f })
+                        .then(function(res) { return res.json().catch(function() { return {}; }).then(function(j) { if (!res.ok || !j.path) throw new Error(j.error || 'not saved'); return j.path; }); });
+                })).then(function(paths) {
+                    // Pasted, as a terminal pastes a dropped file's path.
+                    rgPasteText(paths.join(' ') + ' ');
+                    rgToast(paths.length === 1 ? 'Attached ' + paths[0].split('/').pop() : 'Attached ' + paths.length + ' files');
+                    displayEl.focus();
+                }).catch(function(err) { rgToast('Not sent: ' + err.message, true); });
+            }
+            // Ctrl+V: an image on the clipboard is attached (as Claude Code's
+            // own Ctrl+V does locally); otherwise Ctrl+V goes to the terminal.
+            function rgCtrlV() {
+                var sendCtrlV = function() { sendKeyCombo([0xFFE3, 0x76]); };
+                if (!navigator.clipboard || !navigator.clipboard.read) { sendCtrlV(); return; }
+                navigator.clipboard.read().then(function(items) {
+                    for (var i = 0; i < items.length; i++) {
+                        var t = items[i].types.filter(function(x) { return x.indexOf('image/') === 0; })[0];
+                        if (t) return items[i].getType(t).then(function(blob) { rgSendFiles([new File([blob], rgFileName({ type: t }, 0), { type: t })]); return true; });
+                    }
+                    return false;
+                }).then(function(sent) { if (!sent) sendCtrlV(); }).catch(sendCtrlV);
+            }
+            // Drag and drop onto the terminal.
+            document.addEventListener('dragover', function(e) {
+                if (!terminalSession || !e.dataTransfer || Array.prototype.indexOf.call(e.dataTransfer.types || [], 'Files') < 0) return;
+                if (filesystem && filePanelOpen) return;
+                e.preventDefault();
+                e.dataTransfer.dropEffect = 'copy';
+            });
+            document.addEventListener('drop', function(e) {
+                if (!terminalSession || !e.dataTransfer || !e.dataTransfer.files || !e.dataTransfer.files.length) return;
+                if (filesystem && filePanelOpen) return;
+                e.preventDefault();
+                e.stopPropagation();
+                rgSendFiles(Array.prototype.slice.call(e.dataTransfer.files));
+            }, true);
+            function rgDirectPaste() {
+                pasteSink.value = '';
+                pasteSink.focus();
+                // No paste event (a browser that sends none to a field it
+                // just focused): ask the Clipboard API instead.
+                pasteTimer = setTimeout(function() {
+                    pasteTimer = null;
+                    rgPasteDone();
+                    if (navigator.clipboard && navigator.clipboard.readText)
+                        navigator.clipboard.readText().then(rgPasteText).catch(function() {});
+                }, 500);
+            }
+            document.addEventListener('keydown', function(e) {
+                if (!macKeys || !terminalSession || panelOpen || !client) return;
+                if (e.target !== displayEl && e.target !== document.body) return;
+                // Ctrl+V: an image on the clipboard, or Ctrl+V itself.
+                if (e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && (e.key === 'v' || e.key === 'V')) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    swallowedKeyups[e.code] = 1;
+                    if (!e.repeat) rgCtrlV();
+                    return;
+                }
+                // Cmd+V: let the browser paste, into the hidden field.
+                if (e.metaKey && !e.ctrlKey && !e.altKey && (e.key === 'v' || e.key === 'V')) {
+                    e.stopPropagation();   // not to Guacamole; no preventDefault, so the paste happens
+                    if (!e.repeat) rgDirectPaste();
+                    return;
+                }
+                // Cmd+C: the terminal already copied the selection to the
+                // session clipboard; put it on this computer's clipboard now,
+                // inside the key press (Safari allows a write only then).
+                if (e.metaKey && !e.ctrlKey && !e.altKey && (e.key === 'c' || e.key === 'C')) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    swallowedKeyups[e.code] = 1;
+                    if (remoteClipboard && navigator.clipboard && navigator.clipboard.writeText) {
+                        navigator.clipboard.writeText(remoteClipboard).then(function() {
+                            setClipboardStatus('Copied.');
+                        }).catch(function() {});
+                    }
+                    return;
+                }
+                var act = rgTermKeyAction(e);
+                if (!act) return;
+                e.preventDefault();       // Cmd+Left is also the browser's Back
+                e.stopPropagation();
+                swallowedKeyups[e.code] = 1;
+                var lifted = [];
+                if (act.lift) {
+                    var syms = act.lift === 'meta' ? META_SYMS : act.lift === 'shift' ? SHIFT_SYMS : ALT_SYMS;
+                    syms.forEach(function(k) { if (keyboard.pressed[k]) lifted.push(k); });
+                }
+                lifted.forEach(function(k) { client.sendKeyEvent(0, k); });
+                act.keys.forEach(function(combo) { sendKeyCombo(combo); });
+                lifted.forEach(function(k) { client.sendKeyEvent(1, k); });
+            }, true);
+            document.addEventListener('keyup', function(e) {
+                if (swallowedKeyups[e.code]) {
+                    delete swallowedKeyups[e.code];
+                    e.preventDefault();
+                    e.stopPropagation();
+                }
+                // macOS sends no keyup for other keys while Cmd is held.
+                if (e.key === 'Meta') swallowedKeyups = {};
             }, true);
 
             keyboard.onkeydown = function(keysym) {

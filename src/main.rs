@@ -14,10 +14,13 @@ mod pve;
 mod recording;
 mod recording_mp4;
 mod session;
+mod tmux;
 mod tunnel;
+mod upload;
 mod vault;
 mod vdi;
 mod websocket;
+mod workbench;
 
 use crate::api::{
     AppState, CredentialDefaultScope, DriveConfigured, OidcEnabled, OidcHandle, SiteTitle,
@@ -202,6 +205,15 @@ enum Command {
         map: Vec<String>,
     },
 
+    /// Make sure every member of the work bench host's group has a
+    /// work bench folder, entry and console key, and that people who left
+    /// have none ([workbench] in config.toml). Prints what it did.
+    WorkbenchSync {
+        /// Report what would change without writing anything
+        #[arg(long)]
+        dry_run: bool,
+    },
+
     /// Copy an address-book scope subtree between configured Vault backends
     /// (for the multi-Vault DR split). Copies entries and every folder's
     /// `.config`; run with --dry-run first.
@@ -320,6 +332,48 @@ async fn main() {
                 &map,
             )
             .await;
+        }
+        Some(Command::WorkbenchSync { dry_run }) => {
+            let Some(wb) = config.workbench.as_ref() else {
+                eprintln!("Error: no [workbench] section in the config");
+                std::process::exit(1);
+            };
+            let connect = |name: &'static str| {
+                let config = &config;
+                async move {
+                    let c = migrate::connect_named(config, name).await;
+                    let cell: api::VaultCell = Arc::new(tokio::sync::RwLock::new(Some(c)));
+                    cell
+                }
+            };
+            let default = connect("vault").await;
+            let shared = if config.vault_shared.is_some() {
+                connect("vault_shared").await
+            } else {
+                default.clone()
+            };
+            let local = if config.vault_local.is_some() {
+                connect("vault_local").await
+            } else {
+                default.clone()
+            };
+            let vault = VaultBackends {
+                default,
+                shared,
+                local,
+            };
+            let report = workbench::sync(wb, &vault, dry_run).await;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&report).unwrap_or_default()
+            );
+            if !dry_run && workbench::changed(&report) {
+                let details = serde_json::to_string(&report).unwrap_or_default();
+                audit_cli(&database, "workbench_sync", &wb.group, Some(&details));
+            }
+            if !report.errors.is_empty() || !report.host_failures.is_empty() {
+                std::process::exit(2);
+            }
         }
         Some(Command::VaultMigrate {
             scope,
@@ -998,6 +1052,57 @@ async fn run_server(config: Config, database: Db) {
         local: local_cell,
     });
 
+    if let Err(e) = config.tmux.check() {
+        eprintln!("Error: {e}");
+        std::process::exit(1);
+    }
+    let dashboard_info = api::DashboardInfo {
+        tmux: config.tmux.clone(),
+        workbench: config.workbench.clone(),
+    };
+
+    // Work bench folders, on a timer when configured.
+    if let Some(wb) = config.workbench.clone().filter(|w| w.interval_mins > 0) {
+        let vault = vault_client.clone();
+        let db = database.clone();
+        tokio::spawn(async move {
+            // Give Vault time to connect first.
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            loop {
+                let r = workbench::sync(&wb, &vault, false).await;
+                for e in &r.errors {
+                    tracing::warn!(error = %e, "workbench sync");
+                }
+                for (u, why) in &r.host_failures {
+                    tracing::warn!(user = %u, reason = %why, "workbench sync: key not written");
+                }
+                if workbench::changed(&r) {
+                    tracing::info!(
+                        folders = ?r.folders_written, entries = ?r.entries_written,
+                        keys = ?r.host, removed = ?r.folders_removed, "workbench sync changed things"
+                    );
+                    let details = serde_json::to_string(&r).unwrap_or_default();
+                    let db = db.clone();
+                    let scope = wb.scope.clone();
+                    let _ = tokio::task::spawn_blocking(move || {
+                        db::log_addressbook_event(
+                            &db,
+                            "system:workbench-sync",
+                            "workbench_sync",
+                            &scope,
+                            "",
+                            None,
+                            None,
+                            Some(&details),
+                        )
+                    })
+                    .await;
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(wb.interval_mins * 60)).await;
+            }
+        });
+    }
+
     let oidc_enabled = OidcEnabled(oidc_state.is_some());
     let vault_configured = VaultConfigured(config.vault.is_some());
     let ab_changes = api::AddressBookChanges::default();
@@ -1063,6 +1168,7 @@ async fn run_server(config: Config, database: Db) {
             "admin.html",
             "tokens.html",
             "docs.html",
+            "dashboard.html",
         ] {
             let path = std::path::Path::new(&static_path).join(name);
             if let Ok(html) = std::fs::read_to_string(&path) {
@@ -1487,6 +1593,35 @@ async fn run_server(config: Config, database: Db) {
             "/api/addressbook/folders/{scope}/{folder}/entries/{entry}/connect",
             post(api::ab_connect_entry),
         )
+        .route(
+            "/api/addressbook/folders/{scope}/{folder}/entries/{entry}/tmux",
+            get(api::ab_tmux_list),
+        )
+        .route(
+            "/api/addressbook/folders/{scope}/{folder}/entries/{entry}/tmux/repos",
+            get(api::ab_tmux_repos),
+        )
+        .route(
+            "/api/addressbook/folders/{scope}/{folder}/entries/{entry}/upload",
+            post(api::ab_upload).layer(DefaultBodyLimit::max(crate::upload::MAX_BYTES + 64 * 1024)),
+        )
+        .route(
+            "/api/addressbook/folders/{scope}/{folder}/entries/{entry}/tmux/dashboard",
+            get(api::ab_tmux_dashboard),
+        )
+        .route(
+            "/api/addressbook/folders/{scope}/{folder}/entries/{entry}/tmux/send",
+            post(api::ab_tmux_send),
+        )
+        .route("/api/dashboard/config", get(api::dashboard_config))
+        .route(
+            "/api/addressbook/folders/{scope}/{folder}/entries/{entry}/tmux/start",
+            post(api::ab_tmux_start),
+        )
+        .route(
+            "/api/addressbook/folders/{scope}/{folder}/entries/{entry}/tmux/presets",
+            get(api::ab_tmux_presets_get).put(api::ab_tmux_presets_put),
+        )
         .route("/api/ssh/probe-host-key", post(api::ssh_probe_host_key))
         .merge(session_create_route)
         .with_state(manager.clone())
@@ -1502,6 +1637,7 @@ async fn run_server(config: Config, database: Db) {
         .layer(Extension(credential_default_scope.clone()))
         .layer(Extension(database.clone()))
         .layer(Extension(ab_changes.clone()))
+        .layer(Extension(dashboard_info.clone()))
         .layer(Extension(mp4_converter.clone()));
     // Applied OUTSIDE require_auth so requests with bad credentials are
     // counted too: a flood of bogus keys is throttled before each one
@@ -1568,6 +1704,7 @@ async fn run_server(config: Config, database: Db) {
         .route("/admin.html", get(serve_branded_page))
         .route("/tokens.html", get(serve_branded_page))
         .route("/docs.html", get(serve_branded_page))
+        .route("/dashboard.html", get(serve_branded_page))
         // Optional auth only: an anonymous request still gets the page (the
         // page itself sends the user to log in), but a logged-in one gets
         // the variant with its navigation already right. No WsTicketStore
@@ -2042,10 +2179,13 @@ async fn serve_client_page(
         Ok(id) => manager.get_session(id).await,
         Err(_) => None,
     };
-    if session
-        .as_ref()
-        .is_some_and(|s| client_frameable(s.fullscreen_on_connect, s.address_book_entry.is_some()))
-    {
+    if session.as_ref().is_some_and(|s| {
+        client_frameable(
+            s.fullscreen_on_connect,
+            s.tmux_session.is_some(),
+            s.address_book_entry.is_some(),
+        )
+    }) {
         response.extensions_mut().insert(ClientFrameable);
     }
     response
@@ -2053,11 +2193,12 @@ async fn serve_client_page(
 
 /// Whether a session's client page may be framed by our own origin: only a
 /// session opened from a saved entry whose admin turned fullscreen-on-connect
-/// on. That is the only case the Connections page hosts the client in an
-/// iframe; an ad-hoc session, whatever its request said, and an unknown or
-/// ended session are never frameable.
-fn client_frameable(fullscreen_on_connect: bool, from_entry: bool) -> bool {
-    fullscreen_on_connect && from_entry
+/// on, or one attached to a tmux session (#325), which the tmux workspace
+/// (`tmux.html`) shows as one of its tabs. Those are the only cases our
+/// pages host the client in an iframe; an ad-hoc session, whatever its
+/// request said, and an unknown or ended session are never frameable.
+fn client_frameable(fullscreen_on_connect: bool, tmux: bool, from_entry: bool) -> bool {
+    (fullscreen_on_connect || tmux) && from_entry
 }
 
 /// HTML-escape a string to prevent XSS when injecting config values into HTML.
@@ -2147,14 +2288,19 @@ mod tests {
     }
 
     #[test]
-    fn only_fullscreen_entry_sessions_are_frameable() {
-        assert!(client_frameable(true, true));
-        assert!(!client_frameable(false, true), "a normal entry");
+    fn only_fullscreen_and_tmux_entry_sessions_are_frameable() {
+        assert!(client_frameable(true, false, true));
+        assert!(client_frameable(false, true, true), "a tmux tab");
+        assert!(!client_frameable(false, false, true), "a normal entry");
         assert!(
-            !client_frameable(true, false),
+            !client_frameable(true, false, false),
             "an ad-hoc session cannot opt itself in"
         );
-        assert!(!client_frameable(false, false));
+        assert!(
+            !client_frameable(false, true, false),
+            "nor can an ad-hoc tmux session"
+        );
+        assert!(!client_frameable(false, false, false));
     }
 
     #[tokio::test]

@@ -124,7 +124,7 @@ To add a new patch: edit `../guacamole-server`, export with `git diff > patches/
 
 ## Session types
 
-- **SSH** — connects guacd directly to target SSH server
+- **SSH** — connects guacd directly to target SSH server. With `tmux: true` on the entry (or SSH protocol), connect can attach to a named tmux session on the host (`src/tmux.rs`, guacd `command`); the Connections menu lists the host's sessions over a short russh exec (`tunnel::run_command`) and opens them in `static/tmux.html`, a tabbed workspace whose tabs reconnect on their own (#325). **Advanced** starts a batch of sessions with startup commands typed in (`tmux::start_command`, base64 over the wire, only into sessions it created); per-user presets live in the SQLite `tmux_presets` table. rustguac never kills a tmux session. The workspace's + popover and the dashboard (`static/dashboard.html`, Mine / All users, Open all) list the git repos under `[tmux] repos_dir` and start a session in one with a startup command (`[tmux] repo_command`, placeholders filled in by `static/tmux-cmd.js`). `src/workbench.rs` (`[workbench]`) gives every member of a host group their own folder, entry and console-only key. User guide: `docs/tmux-workspace.md`
 - **RDP** — connects guacd directly to target RDP server (same pattern as SSH, no browser spawning)
 - **VNC** — connects guacd directly to target VNC server
 - **Web** — spawns Xvnc + Chromium, guacd connects via VNC to local Xvnc display

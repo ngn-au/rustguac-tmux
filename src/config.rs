@@ -615,6 +615,11 @@ pub struct Config {
     pub recording: Option<RecordingConfig>,
     pub vdi: Option<VdiConfig>,
     pub rdp: Option<RdpConfig>,
+    /// The repo list of the tmux workspace and the dashboard.
+    #[serde(default)]
+    pub tmux: crate::tmux::TmuxConfig,
+    /// Work bench folders for a host group's members.
+    pub workbench: Option<crate::workbench::WorkbenchConfig>,
 }
 
 /// RDP-wide defaults applied when an address book entry (or ad-hoc
@@ -1343,6 +1348,8 @@ impl Default for Config {
             theme: None,
             recording: None,
             vdi: None,
+            tmux: Default::default(),
+            workbench: None,
             rdp: None,
         }
     }

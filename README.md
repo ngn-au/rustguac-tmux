@@ -9,6 +9,8 @@ A lightweight Rust replacement for the Apache Guacamole Java webapp. Browser-bas
 
 No Java. No Tomcat. Single binary + guacd.
 
+> **This fork** adds a tmux workspace and a per-user dashboard to [sol1/rustguac](https://github.com/sol1/rustguac): SSH sessions that live in named tmux sessions on the host and open as tabs that reconnect on their own, a list of your git repos with one-click sessions and a startup command (for example Claude Code named after the repo), a dashboard of the sessions waiting on you, and terminal fixes for mouse scrolling, clipboard, Mac keys and pasted images. See [tmux Workspace and Dashboard](docs/tmux-workspace.md).
+
 ## Architecture
 
 ```
@@ -163,6 +165,7 @@ Add `[vdi]` to your config and create a VDI entry in the connections. See [VDI D
 
 ### Features
 - [Roles & Access Control](docs/roles-and-access-control.md): OIDC, roles, group mappings, API tokens
+- [tmux Workspace and Dashboard](docs/tmux-workspace.md): long-running terminal sessions as tabs, repo list, startup commands, the per-user dashboard
 - [Web Browser Sessions](docs/web-sessions.md): autofill, domain allowlisting, login scripts
 - [SPICE and Proxmox VE Sessions](docs/spice-and-proxmox.md): SPICE displays, Proxmox VE consoles, API tokens, TLS, troubleshooting
 - [VDI Desktop Containers](docs/vdi.md): Docker desktops, image requirements, persistent homes

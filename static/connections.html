@@ -219,8 +219,72 @@
         .fm-defaults-table textarea { min-height: var(--ctl-sm); resize: vertical; }
         .fmd-clear-label { display: flex; align-items: center; gap: var(--s-1); font-size: var(--fz-xs); color: var(--text-dim); white-space: nowrap; padding-top: var(--s-2); }
 
-        /* Active sessions strip */
-        .active-sessions { margin-bottom: var(--s-5); }
+        /* Active sessions (#333): a button in the nav opens a panel over the
+           page, so sessions starting and ending never move the page. The
+           panel always opens downwards from the button; it is positioned by
+           positionActiveSessions(). */
+        .as-wrap { margin-left: auto; }
+        .as-wrap:not([hidden]) + #user-menu-wrapper { margin-left: 0; }
+        .as-btn {
+            display: inline-flex; align-items: center; gap: var(--s-2);
+            height: var(--ctl-sm); padding: 0 var(--s-3);
+            background: transparent; color: var(--text);
+            border: 1px solid var(--border); border-radius: var(--radius);
+            font-size: var(--fz-sm); font-weight: normal; cursor: pointer;
+            transition: color .12s, border-color .12s;
+        }
+        .as-btn:hover, .as-btn[aria-expanded="true"] { color: var(--accent); border-color: var(--accent); background: transparent; }
+        .as-dot {
+            width: 8px; height: 8px; border-radius: 50%; flex: none;
+            background: var(--status-active);
+            box-shadow: 0 0 0 3px color-mix(in srgb, var(--status-active) 25%, transparent);
+        }
+        .as-count {
+            min-width: 1.8em; padding: 0 6px; border-radius: 999px;
+            background: var(--input); color: var(--text);
+            font-size: var(--fz-xs); line-height: 1.7; text-align: center;
+        }
+        .active-sessions {
+            position: fixed; z-index: 250; top: 0; left: 0; right: 0;
+            display: flex; flex-direction: column;
+            background: var(--surface);
+            border: 1px solid var(--border); border-radius: 8px;
+            box-shadow: 0 18px 48px rgba(0, 0, 0, 0.55);
+            padding: var(--s-3) var(--s-4);
+            box-sizing: border-box; overflow-y: auto;
+            animation: as-in 120ms ease-out both;
+        }
+        .active-sessions[hidden] { display: none; }
+        .active-sessions:focus { outline: none; }
+        @keyframes as-in { from { opacity: 0; transform: translateY(-6px); } }
+        .active-sessions .section-head { margin-bottom: var(--s-3); }
+        /* Room under the cards for the row's scrollbar, which Safari and
+           macOS draw over the content, and a slim one where it can be styled. */
+        .active-sessions .session-grid {
+            padding-bottom: var(--s-4);
+            scrollbar-width: thin;
+            scrollbar-color: var(--border) transparent;
+        }
+        .active-sessions .session-grid::-webkit-scrollbar { height: 8px; }
+        .active-sessions .session-grid::-webkit-scrollbar-track { background: transparent; }
+        .active-sessions .session-grid::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+        .active-sessions .session-grid::-webkit-scrollbar-thumb:hover { background: var(--text-dim); }
+        .as-actions { margin-left: auto; display: flex; align-items: center; gap: var(--s-2); }
+        .as-terminate-all { color: var(--primary); }
+        .as-terminate-all:hover:not(:disabled) { color: var(--text-on-primary); background: var(--primary); border-color: var(--primary); }
+        .as-close {
+            width: 32px; height: 32px; padding: 0; flex: none;
+            display: inline-flex; align-items: center; justify-content: center;
+            background: transparent; color: var(--text-muted);
+            border: 1px solid var(--border); border-radius: 50%;
+            font-size: 20px; line-height: 1; cursor: pointer;
+            transition: color .12s, border-color .12s, background .12s;
+        }
+        .as-close:hover { color: var(--text); border-color: var(--text-muted); background: var(--input); }
+        .as-btn:focus-visible, .as-close:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+        @media (max-width: 640px) {
+            .as-label { display: none; }
+        }
         .session-grid { display: flex; gap: var(--s-3); overflow-x: auto; padding-bottom: var(--s-2); }
         .session-card {
             flex: 0 0 auto; width: 280px;
@@ -518,6 +582,7 @@
             to   { background-position: 250% 0; }
         }
         @media (prefers-reduced-motion: reduce) {
+            .active-sessions { animation: none; }
             #entries-header.changed #entries-title,
             #entries-header.changed .folder-actions,
             .sk-bar { animation: none; }
@@ -584,8 +649,8 @@
         }
         .main { min-height: 0; overflow-y: auto; overflow-x: hidden; padding-left: var(--s-5); padding-right: var(--s-5); }
         /* The folder header (name, description, search, actions, filters)
-           pins to the top of the entries pane, so it stays under the nav and
-           the active-sessions strip while a long table scrolls beneath it. */
+           pins to the top of the entries pane, so it stays under the nav
+           while a long table scrolls beneath it. */
         #entries-header {
             position: sticky; top: 0; z-index: 30;
             background: var(--bg);
@@ -670,45 +735,45 @@
         .proto-badges .proto-primary { box-shadow: inset 0 0 0 1.5px currentColor; }
         .proto-badges > * { flex: none; }
         .proto-badges .proto-extra { opacity: 0.8; }
-        /* Connect split button: Connect and the protocol menu toggle are one
-           control, one border, one height, rounded only on the outer ends. */
-        .split-btn { display: inline-flex; vertical-align: middle; }
-        .split-btn .btn-connect { margin: 0; }
-        .split-btn .split-main { border-top-right-radius: 0; border-bottom-right-radius: 0; }
-        .split-btn .split-toggle {
-            min-width: 0; width: 26px; padding: 0; margin-left: 0;
-            border-top-left-radius: 0; border-bottom-left-radius: 0;
-            border-left: 1px solid color-mix(in srgb, var(--bg) 35%, transparent);
-            font-size: var(--fz-sm); line-height: 1;
-        }
-        .split-btn .split-toggle[aria-expanded="true"] { background: var(--accent-hover); }
-        /* The protocol menu: fixed, so the table never clips it, and placed
-           inside the viewport when it opens (openProtoMenu). */
-        .proto-menu-list {
-            position: fixed; z-index: 150; min-width: 200px; max-width: calc(100vw - 16px);
-            max-height: calc(100vh - 16px); overflow-y: auto;
-            background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
-            padding: var(--s-1); box-shadow: 0 8px 28px rgba(0,0,0,.45); text-align: left;
-        }
-        .proto-menu-list[hidden] { display: none; }
-        .proto-item {
-            display: flex; align-items: center; justify-content: flex-start; gap: var(--s-2); width: 100%;
-            padding: 5px var(--s-2); margin: 0; min-width: 0; height: auto;
-            background: transparent; border: 0; border-radius: var(--radius);
-            color: var(--text); font-size: var(--fz-sm); text-align: left; cursor: pointer; white-space: nowrap;
-        }
-        .proto-item:hover, .proto-item:focus { background: var(--input); outline: none; }
-        .proto-item:focus-visible { box-shadow: inset 0 0 0 1px var(--accent); }
-        .proto-item .type-badge { font-size: 10.5px; line-height: 16px; padding: 1px 5px; min-width: 44px; letter-spacing: 0.06em; }
-        .proto-item .pi-name { overflow: hidden; text-overflow: ellipsis; }
-        .proto-item .pi-detail { color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; max-width: 16em; }
-        .proto-item .pi-port { color: var(--text-muted); margin-left: auto; padding-left: var(--s-2); font-variant-numeric: tabular-nums; }
-        .proto-item .pi-default {
-            font-size: 10px; line-height: 14px; padding: 0 5px; border-radius: 7px;
-            border: 1px solid var(--accent); color: var(--accent); text-transform: uppercase; letter-spacing: 0.06em;
-        }
         .session-card-info .card-meta > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         .session-card-info .card-meta .type-badge { flex: none; }
+        /* Start tmux sessions with startup commands (#325). */
+        #tmux-start-modal .modal { max-width: 980px; width: min(980px, calc(100vw - 32px)); min-width: 0; box-sizing: border-box; }
+        #tmux-start-modal [hidden] { display: none !important; }
+        #tmux-start-modal .ts-btn {
+            background: transparent; color: var(--text); border: 1px solid var(--border); border-radius: var(--radius);
+            padding: 0 var(--s-3); font-family: inherit; cursor: pointer; text-transform: none; letter-spacing: 0;
+        }
+        #tmux-start-modal .ts-btn:hover { border-color: var(--accent); color: var(--accent); }
+        #tmux-start-modal .ts-btn.danger:hover { border-color: var(--status-error); color: var(--status-error); }
+        .ts-bar { display: flex; gap: var(--s-2); align-items: end; flex-wrap: wrap; }
+        .ts-bar .grow { flex: 1; min-width: 180px; }
+        .ts-bar button { margin: 0; height: 32px; }
+        .ts-grid { display: grid; grid-template-columns: minmax(130px, 1fr) minmax(140px, 1.3fr) minmax(200px, 2.6fr) 32px; gap: 4px var(--s-1); align-items: start; margin-top: var(--s-3); }
+        .ts-grid .ts-h { color: var(--text-muted); font-size: var(--fz-xs); text-transform: uppercase; letter-spacing: 0.08em; padding-left: 2px; }
+        .ts-grid input { margin: 0; height: 30px; font-size: var(--fz-sm); box-sizing: border-box; }
+        .ts-grid input.bad { border-color: var(--status-error); }
+        .ts-grid .ts-x { height: 30px; width: 32px; min-width: 0; padding: 0; margin: 0; background: transparent; border: 1px solid var(--border); color: var(--text-muted); border-radius: var(--radius); cursor: pointer; }
+        .ts-grid .ts-x:hover { color: var(--status-error); border-color: var(--status-error); }
+        .ts-state { grid-column: 1 / -1; margin: -2px 0 2px 2px; font-size: var(--fz-xs); color: var(--text-muted); }
+        .ts-state:empty { display: none; }
+        .ts-state.running { color: var(--accent); }
+        .ts-state.err { color: var(--status-error); }
+        .ts-tools { display: flex; gap: var(--s-2); margin-top: var(--s-2); flex-wrap: wrap; }
+        .ts-tools button, .ts-save button { margin: 0; height: 30px; font-size: var(--fz-sm); }
+        #ts-text { height: auto; min-height: 220px; padding: var(--s-2); font-size: var(--fz-sm); line-height: 1.5; white-space: pre; resize: vertical; }
+        .ts-save { display: flex; gap: var(--s-2); align-items: center; margin-top: var(--s-3); flex-wrap: wrap; }
+        .ts-save input { margin: 0; height: 30px; flex: 1; min-width: 160px; max-width: 280px; }
+        .ts-save .ts-saved { color: var(--text-muted); font-size: var(--fz-xs); }
+        .ts-results { margin-top: var(--s-3); font-size: var(--fz-sm); }
+        .ts-results div { padding: 2px 0; }
+        .ts-results .err { color: var(--status-error); }
+        @media (max-width: 720px) {
+            .ts-grid { grid-template-columns: 1fr 32px; }
+            .ts-grid .ts-h { display: none; }
+            .ts-grid .ts-dir, .ts-grid .ts-cmd { grid-column: 1 / 2; }
+            .ts-grid .ts-x { grid-column: 2; grid-row: span 1; }
+        }
     </style>
     <script>(function(){var c=localStorage.getItem('rustguac_theme_colors');if(c){try{var o=JSON.parse(c),r=document.documentElement.style;for(var k in o)r.setProperty('--'+k.replace(/_/g,'-'),o[k]);if(o.bg_pattern&&o.bg_pattern!=='none'){var s=document.createElement('style');s.id='bg-pattern-style';s.textContent='body{background-image:'+o.bg_pattern+';background-attachment:fixed}';document.head.appendChild(s)}}catch(e){}}})();</script>
 </head>
@@ -719,6 +784,7 @@
     </div>
     <nav>
         <a href="/connections.html" class="active">Connections</a>
+        <a href="/dashboard.html" id="dashboard-link" data-min-role="operator">Dashboard</a>
         <a href="/sessions.html" id="sessions-link" data-min-role="poweruser">Sessions</a>
         <a href="/recordings.html">Recordings</a>
         <a href="/reports.html" id="reports-link" data-min-role="poweruser">Reports</a>
@@ -726,6 +792,9 @@
         <a href="/tokens.html" id="tokens-link" data-min-role="operator">Tokens</a>
         <a href="/admin.html" id="admin-link" data-min-role="admin">Admin</a>
         <a href="#" id="my-creds-nav" title="Manage your saved credential variables"><span class="nav-key">&#128273;</span> Credentials</a>
+        <span id="as-wrap" class="as-wrap" hidden>
+            <button type="button" id="as-btn" class="as-btn" aria-haspopup="dialog" aria-expanded="false" aria-controls="active-sessions" title="Your active sessions"><span class="as-dot" aria-hidden="true"></span><span class="as-label">Active sessions</span><span id="active-sessions-count" class="as-count"></span></button>
+        </span>
         <span id="user-menu-wrapper">
             <a href="#" id="logout-item">Logout</a>
             <span id="user-menu-btn" title="Preferences">&#9881; Settings</span>
@@ -746,6 +815,18 @@
     </nav>
 
     <div id="global-error"></div>
+
+    <div id="active-sessions" class="active-sessions" role="dialog" aria-labelledby="as-title" tabindex="-1" hidden>
+        <div class="section-head">
+            <strong id="as-title">Active Sessions</strong>
+            <span id="as-panel-count" class="section-count"></span>
+            <div class="as-actions">
+                <button type="button" id="as-terminate-all" class="btn-add as-terminate-all" title="End every session of yours listed here">Terminate all</button>
+                <button type="button" id="as-close" class="as-close" aria-label="Close active sessions" title="Close (Esc)">&times;</button>
+            </div>
+        </div>
+        <div id="active-sessions-grid" class="session-grid"></div>
+    </div>
 
     <div id="no-vault" class="no-vault" style="display:none">
         Connections is not configured. A Vault/OpenBao backend is required.<br>
@@ -770,13 +851,6 @@
             <span id="creds-banner-text" style="flex:1"></span>
             <button class="btn-small" id="creds-banner-setup">Set up now</button>
             <span id="creds-banner-dismiss" title="Dismiss" style="cursor:pointer;color:var(--text-dim);padding:0 0.3em">&times;</span>
-        </div>
-        <div id="active-sessions" class="active-sessions" style="display:none">
-            <div class="section-head">
-                <strong>Active Sessions</strong>
-                <span id="active-sessions-count" class="section-count"></span>
-            </div>
-            <div id="active-sessions-grid" class="session-grid"></div>
         </div>
         <div class="layout">
             <div class="sidebar">
@@ -962,6 +1036,12 @@
                     <input type="number" id="em-ssh-font-size" min="6" max="72" placeholder="12">
                 </label>
                 <div class="field-hint">Points. Leave blank for the default (12). Increase or decrease to tune readability — the terminal size no longer scales with display DPI.</div>
+                <div class="entry-only">
+                <label style="margin-top:0.8em">
+                    <input type="checkbox" id="em-ssh-tmux" style="display:inline;width:auto;margin-right:0.4em"> tmux sessions
+                </label>
+                <div class="field-hint">Connect's menu lists the host's tmux sessions and opens them in a workspace of tabs that reconnect on their own; the shell keeps running on the host when the browser closes. Listing logs in with the stored credentials. Needs tmux on the host.</div>
+                </div>
                 <div class="entry-only">
                 <label style="margin-top:0.8em">
                     <input type="checkbox" id="em-ssh-prompt-creds" style="display:inline;width:auto;margin-right:0.4em"> Prompt for credentials at connect time
@@ -1491,6 +1571,49 @@
         </div>
     </div>
 
+    <!-- Start tmux sessions with startup commands (#325) -->
+    <div class="modal-overlay" id="tmux-start-modal">
+        <div class="modal" role="dialog" aria-labelledby="ts-title">
+            <h3 id="ts-title">Start tmux sessions</h3>
+            <p class="modal-hint" id="ts-target"></p>
+            <div class="ts-bar">
+                <div class="grow">
+                    <label for="ts-preset">Preset</label>
+                    <select id="ts-preset"></select>
+                </div>
+                <button type="button" class="ts-btn danger" id="ts-preset-delete" hidden>Delete preset</button>
+            </div>
+            <div id="ts-rows-view">
+                <div class="field-hint">Paste a batch, one session per line, into any row (or use <b>Edit as text</b>): <code>name @/folder "commands"</code>.</div>
+                <div class="ts-grid" id="ts-rows"></div>
+                <div class="ts-tools">
+                    <button type="button" class="ts-btn" id="ts-add">+ Add row</button>
+                    <button type="button" class="ts-btn" id="ts-as-text">Edit as text</button>
+                </div>
+            </div>
+            <div id="ts-text-view" hidden>
+                <label for="ts-text">One session per line</label>
+                <textarea id="ts-text" spellcheck="false" autocomplete="off"></textarea>
+                <div class="field-hint"><code>name "commands"</code> or <code>name: commands</code>, with an optional starting folder after the name: <code>name @/srv/app "commands"</code>. Lines starting with <code>#</code> are skipped.</div>
+                <div class="ts-tools">
+                    <button type="button" class="ts-btn" id="ts-as-rows">Back to rows</button>
+                </div>
+            </div>
+            <div class="field-hint">Commands are typed into a session only when this creates it. A session that is already running is just opened, and nothing is typed into it. rustguac never ends a session: exit it from its own shell.</div>
+            <div class="ts-save">
+                <input type="text" id="ts-save-name" maxlength="64" placeholder="Preset name" aria-label="Preset name" autocomplete="off">
+                <button type="button" class="ts-btn" id="ts-save">Save preset</button>
+                <span class="ts-saved" id="ts-saved"></span>
+            </div>
+            <div class="ts-results" id="ts-results"></div>
+            <div id="ts-error" style="color:var(--primary);margin-top:0.5em"></div>
+            <div class="modal-actions">
+                <button class="btn-cancel" id="ts-cancel">Cancel</button>
+                <button class="btn-add" id="ts-start">Start</button>
+            </div>
+        </div>
+    </div>
+
     <div class="modal-overlay" id="share-modal">
         <div class="modal">
             <h3>Share Session</h3>
@@ -1562,6 +1685,7 @@
         </div>
     </div>
 
+<script src="/connect-menu.js"></script>
 <script src="/filters.js"></script>
         <script>
         function togglePw(btn){var inp=btn.previousElementSibling;if(inp.type==='password'){inp.type='text';btn.textContent='\u25CB'}else{inp.type='password';btn.textContent='\u25CF'}}
@@ -2124,16 +2248,22 @@
                 });
 
                 var grid = document.getElementById('active-sessions-grid');
-                var section = document.getElementById('active-sessions');
                 var total = activeSessions.length + dormantContainers.length;
+                activeSessionList = activeSessions;
 
                 if (total === 0) {
-                    section.style.display = 'none';
+                    closeActiveSessions(false);
+                    document.getElementById('as-wrap').hidden = true;
                     return;
                 }
 
-                section.style.display = '';
-                document.getElementById('active-sessions-count').textContent = '(' + total + ')';
+                document.getElementById('as-wrap').hidden = false;
+                document.getElementById('active-sessions-count').textContent = String(total);
+                document.getElementById('as-panel-count').textContent = '(' + total + ')';
+                document.getElementById('as-terminate-all').hidden = activeSessions.length === 0;
+                // Rebuilt every 10s, possibly while the panel is open and the
+                // row scrolled: keep the row where it was.
+                var scrolled = grid.scrollLeft;
                 grid.innerHTML = '';
 
                 // Render active sessions
@@ -2236,8 +2366,96 @@
                     }
                     grid.appendChild(card);
                 });
+                grid.scrollLeft = scrolled;
             });
         }
+
+        // ── Active sessions panel (#333) and Terminate all (#334) ──
+        var activeSessionList = [];
+        function positionActiveSessions() {
+            // Under the button, as wide as the nav (kept on screen, with a
+            // 16px gutter, where the nav is wider than a phone): always opens
+            // downwards, and never taller than the room left below it.
+            var panel = document.getElementById('active-sessions');
+            var nav = document.querySelector('nav').getBoundingClientRect();
+            var btn = document.getElementById('as-btn').getBoundingClientRect();
+            var vw = document.documentElement.clientWidth;
+            var top = Math.round(btn.bottom + 8);
+            panel.style.top = top + 'px';
+            panel.style.left = Math.round(Math.max(16, nav.left)) + 'px';
+            panel.style.right = Math.round(Math.max(16, vw - nav.right)) + 'px';
+            panel.style.maxHeight = Math.max(160, window.innerHeight - top - 16) + 'px';
+        }
+        function openActiveSessions() {
+            var panel = document.getElementById('active-sessions');
+            panel.hidden = false;
+            document.getElementById('as-btn').setAttribute('aria-expanded', 'true');
+            positionActiveSessions();
+            try { panel.focus({ preventScroll: true }); } catch (e) { panel.focus(); }
+        }
+        function closeActiveSessions(returnFocus) {
+            var panel = document.getElementById('active-sessions');
+            if (panel.hidden) return;
+            panel.hidden = true;
+            document.getElementById('as-btn').setAttribute('aria-expanded', 'false');
+            if (returnFocus) document.getElementById('as-btn').focus();
+        }
+        // A dialog opened from the panel (a Terminate confirmation, the Share
+        // links) sits over it: clicks and Escape there are the dialog's.
+        function dialogOverPanel() {
+            return !!document.querySelector('#rg-dialog-overlay.open, .modal-overlay.active');
+        }
+        document.getElementById('as-btn').addEventListener('click', function() {
+            if (document.getElementById('active-sessions').hidden) openActiveSessions();
+            else closeActiveSessions(false);
+        });
+        document.getElementById('as-close').addEventListener('click', function() { closeActiveSessions(true); });
+        document.addEventListener('pointerdown', function(e) {
+            if (document.getElementById('active-sessions').hidden) return;
+            var t = e.target;
+            if (t.closest && (t.closest('#active-sessions') || t.closest('#as-btn') || t.closest('#rg-dialog-overlay, .modal-overlay'))) return;
+            closeActiveSessions(false);
+        }, true);
+        document.addEventListener('keydown', function(e) {
+            if (e.key !== 'Escape' || document.getElementById('active-sessions').hidden || dialogOverPanel()) return;
+            closeActiveSessions(true);
+        });
+        window.addEventListener('resize', function() {
+            if (!document.getElementById('active-sessions').hidden) positionActiveSessions();
+        });
+        document.getElementById('as-terminate-all').addEventListener('click', function() {
+            var btn = this;
+            var list = activeSessionList.slice();
+            if (!list.length) return;
+            var n = list.length;
+            var dormant = document.querySelectorAll('#active-sessions-grid .session-card.dormant').length;
+            var msg = (n === 1 ? 'Terminate your active session?' : 'Terminate all ' + n + ' of your active sessions?')
+                + ' Any unsaved work in them will be lost.'
+                + (dormant ? ' Dormant desktops are kept.' : '');
+            rgConfirm(msg, { danger: true, confirmText: 'Terminate all' }).then(function(ok) {
+                if (!ok) return;
+                btn.disabled = true;
+                btn.textContent = 'Ending...';
+                Promise.all(list.map(function(s) {
+                    var name = s.entry_display_name || s.hostname || s.url || s.session_id;
+                    return fetch('/api/sessions/' + encodeURIComponent(s.session_id), {
+                        method: 'DELETE',
+                        headers: apiHeaders(),
+                        credentials: 'same-origin'
+                    }).then(function(res) {
+                        // Gone already (ended meanwhile): what was wanted.
+                        if (res.ok || res.status === 404) return null;
+                        return res.text().then(function(t) { return name + ': ' + (t || 'HTTP ' + res.status); });
+                    }).catch(function(err) { return name + ': ' + err.message; });
+                })).then(function(failed) {
+                    failed = failed.filter(Boolean);
+                    if (failed.length) showError('Could not terminate ' + failed.length + ' of ' + n + ' sessions: ' + failed.join('; '));
+                    btn.disabled = false;
+                    btn.textContent = 'Terminate all';
+                    loadActiveSessions();
+                });
+            });
+        });
 
         // `done` runs once the folder list (and any restored selection) is
         // in place, for the URL hash actions that need it.
@@ -2874,13 +3092,16 @@
 
         // Open a folder requested via the URL hash (#open=scope/path), used
         // when the global search on another page links here.
+        // With &tmux-start=entry (and &protocol=name), the folder opens
+        // with that connection's Advanced tmux dialog (#325).
         function rgHashOpen() {
-            var m = /^#open=(.+)$/.exec(location.hash || '');
+            var m = /^#open=([^&]+)(?:&tmux-start=([^&]+)(?:&protocol=([^&]*))?)?$/.exec(location.hash || '');
             if (!m) return;
             var decoded = decodeURIComponent(m[1]);
             var slash = decoded.indexOf('/');
             if (slash < 0) return;
             var scope = decoded.slice(0, slash), path = decoded.slice(slash + 1);
+            if (m[2]) pendingTmuxStart = { scope: scope, folder: path, entry: decodeURIComponent(m[2]), protocol: m[3] ? decodeURIComponent(m[3]) : '' };
             try { history.replaceState(null, '', location.pathname + location.search); } catch (e) {}
             window.rgSelectFolder(scope, path);
         }
@@ -3088,104 +3309,351 @@
         // sessionStorage for this tab; the Folder facet only applies while
         // searching.
         // Folder-view filter (Type), shown in the folder header.
-        // An entry's protocols, primary first; an entry
-        // from an older server is its own single protocol.
-        function entryProtocols(e) { return (e && e.protocols && e.protocols.length) ? e.protocols : [e]; }
-        function entryProtocol(e, name) {
-            if (!e || !name) return e;
-            var ps = entryProtocols(e);
-            for (var i = 0; i < ps.length; i++) if (ps[i].protocol === name) return ps[i];
-            return e;
+        // The Connect menu (connect-menu.js), shared with the global search:
+        // every protocol of an entry, and the tmux sessions of each SSH
+        // protocol with tmux on (#325).
+        var CM = window.rgConnectMenu;
+        var entryProtocols = CM.protocols, entryProtocol = CM.protocol;
+        var protoSummary = CM.protoSummary, TMUX_NAME_RE = CM.NAME_RE;
+        var closeProtoMenus = CM.close, tmuxEntryOf = CM.entryOf, tmuxEntryUrl = CM.entryUrl;
+        var tmuxProtoQuery = CM.protoQuery, tmuxJson = CM.json, renderTmuxPresets = CM.renderPresets;
+        var tmuxStartAndOpen = CM.startAndOpen, tmuxStartLines = CM.startLines;
+
+        // The Advanced dialog: rows of name, folder and commands; or the same
+        // as text, one session per line, for pasting a batch.
+        var tsSec = null;           // the menu section it was opened from (a detached copy)
+        var tsPresets = [];
+        var tsDraftKey = null;      // whose unsaved rows the dialog still holds
+        function tsRowsEl() { return document.getElementById('ts-rows'); }
+        function tsAddRow(spec, focus) {
+            var grid = tsRowsEl();
+            spec = spec || {};
+            var mk = function(cls, ph, val, max, label) {
+                var i = document.createElement('input');
+                i.type = 'text'; i.className = cls; i.placeholder = ph; i.value = val || ''; i.maxLength = max;
+                i.spellcheck = false; i.autocomplete = 'off'; i.setAttribute('aria-label', label);
+                return i;
+            };
+            var name = mk('ts-name', 'session', spec.name, 64, 'Session name');
+            var dir = mk('ts-dir', 'folder (optional)', spec.dir, 1024, 'Starting folder');
+            var cmd = mk('ts-cmd', 'commands, e.g. claude --continue', spec.commands, 8192, 'Startup commands');
+            var x = document.createElement('button');
+            x.type = 'button'; x.className = 'ts-x'; x.textContent = '×'; x.title = 'Remove this row'; x.setAttribute('aria-label', 'Remove this row');
+            var st = document.createElement('div');
+            st.className = 'ts-state';
+            var parts = [name, dir, cmd, x, st];
+            x.addEventListener('click', function() {
+                parts.forEach(function(el) { el.remove(); });
+                if (!grid.querySelector('.ts-name')) tsAddRow(null, true);
+                tsUpdate();
+            });
+            name.addEventListener('input', tsUpdate);
+            cmd.addEventListener('keydown', function(ev) {
+                // Enter in the last row's commands adds a row.
+                if (ev.key === 'Enter' && !ev.isComposing) {
+                    ev.preventDefault();
+                    var cmds = grid.querySelectorAll('.ts-cmd');
+                    if (cmds[cmds.length - 1] === cmd) tsAddRow(null, true);
+                    else { var names = grid.querySelectorAll('.ts-name'); var i = Array.prototype.indexOf.call(cmds, cmd); names[i + 1].focus(); }
+                }
+            });
+            parts.forEach(function(el) { grid.appendChild(el); });
+            if (focus) name.focus();
+            tsUpdate();
         }
-        // A protocol's port as the menu shows it: its own, or its type's
-        // standard one; a web protocol's from its URL when it names one.
-        var STANDARD_PORTS = { ssh: 22, rdp: 3389, vnc: 5900, spice: 5900 };
-        function protoPort(p) {
-            if (p.session_type === 'web') {
-                var m = /^[a-z]+:\/\/[^\/:?#]+:(\d+)/i.exec(p.url || '');
-                return m ? m[1] : null;
+        function tsSetRows(specs) {
+            var grid = tsRowsEl();
+            grid.innerHTML = '<span class="ts-h">Session</span><span class="ts-h">Folder</span><span class="ts-h">Commands</span><span class="ts-h"></span>';
+            (specs && specs.length ? specs : [null]).forEach(function(sp) { tsAddRow(sp, false); });
+        }
+        function tsTextMode() { return !document.getElementById('ts-text-view').hidden; }
+        // The rows as specs; empty rows are skipped.
+        function tsReadRows() {
+            var grid = tsRowsEl(), out = [];
+            var names = grid.querySelectorAll('.ts-name'), dirs = grid.querySelectorAll('.ts-dir'), cmds = grid.querySelectorAll('.ts-cmd');
+            for (var i = 0; i < names.length; i++) {
+                var sp = { name: names[i].value.trim(), dir: dirs[i].value.trim(), commands: cmds[i].value };
+                if (!sp.name && !sp.dir && !sp.commands.trim()) continue;
+                out.push(sp);
             }
-            return p.port || STANDARD_PORTS[p.session_type] || null;
+            return out;
         }
-        // What a protocol without a port connects to, for the menu.
-        function protoDetail(p) {
-            if (p.session_type === 'proxmox') return p.proxmox_vmid ? 'VM ' + p.proxmox_vmid : '';
-            if (p.session_type === 'vdi') return p.container_image || '';
+        // Text format: `name "commands"`, `name: commands`, with an optional
+        // `@folder` (or `@"folder with spaces"`) after the name.
+        function tsParseText(text) {
+            var out = [];
+            text.split(/\r?\n/).forEach(function(line) {
+                var l = line.trim();
+                if (!l || l.charAt(0) === '#') return;
+                var m = l.match(/^(\S+?):?(?:\s+([\s\S]*))?$/);
+                var sp = { name: m[1], dir: '', commands: (m[2] || '').trim() };
+                var rest = sp.commands;
+                if (rest.charAt(0) === '@') {
+                    var q = rest.charAt(1);
+                    if (q === '"' || q === "'") {
+                        var end = rest.indexOf(q, 2);
+                        if (end < 0) end = rest.length;
+                        sp.dir = rest.slice(2, end);
+                        rest = rest.slice(end + 1).trim();
+                    } else {
+                        var sp1 = rest.search(/\s/);
+                        sp.dir = sp1 < 0 ? rest.slice(1) : rest.slice(1, sp1);
+                        rest = sp1 < 0 ? '' : rest.slice(sp1).trim();
+                    }
+                }
+                var f = rest.charAt(0);
+                if (rest.length >= 2 && (f === '"' || f === "'") && rest.charAt(rest.length - 1) === f) rest = rest.slice(1, -1);
+                sp.commands = rest;
+                out.push(sp);
+            });
+            return out;
+        }
+        function tsToText(specs) {
+            return specs.map(function(sp) {
+                var line = sp.name;
+                if (sp.dir) line += ' @' + (/\s/.test(sp.dir) ? '"' + sp.dir + '"' : sp.dir);
+                if (sp.commands) line += ' "' + sp.commands.replace(/\r?\n/g, '; ') + '"';
+                return line;
+            }).join('\n');
+        }
+        function tsSpecs() { return tsTextMode() ? tsParseText(document.getElementById('ts-text').value) : tsReadRows(); }
+        // Why these specs cannot be started, if they cannot.
+        function tsProblem(specs) {
+            if (!specs.length) return 'Add a session to start.';
+            if (specs.length > 20) return 'At most 20 sessions can be started at once.';
+            var seen = {};
+            for (var i = 0; i < specs.length; i++) {
+                var n = specs[i].name;
+                if (!TMUX_NAME_RE.test(n)) return (n ? n + ': a' : 'A') + ' session name is 1 to 64 letters, digits or _ - @ + = , ~';
+                if (seen[n]) return n + ' is listed twice.';
+                seen[n] = 1;
+            }
             return '';
         }
-        function protoSummary(p) {
-            var nm = p.protocol || p.session_type;
-            var port = protoPort(p);
-            return (nm === p.session_type ? p.session_type.toUpperCase() : nm + ' (' + p.session_type.toUpperCase() + ')') + (port ? ' :' + port : '');
+        // Mark the rows whose session is already running (from the listing
+        // the menu fetched), and keep the Start button's count current.
+        function tsMarkRunning() {
+            if (!tsSec || tsTextMode()) return;
+            var running = {};
+            ((tsSec._orig && tsSec._orig._tmuxSessions) || []).forEach(function(x) { running[x.name] = 1; });
+            var grid = tsRowsEl();
+            var names = grid.querySelectorAll('.ts-name'), states = grid.querySelectorAll('.ts-state');
+            var seen = {};
+            for (var i = 0; i < names.length; i++) {
+                var n = names[i].value.trim();
+                var bad = n && !TMUX_NAME_RE.test(n), dup = n && seen[n];
+                if (n) seen[n] = 1;
+                names[i].classList.toggle('bad', !!(bad || dup));
+                states[i].className = 'ts-state' + (bad || dup ? ' err' : running[n] ? ' running' : '');
+                states[i].textContent = bad ? 'Letters, digits and _ - @ + = , ~ only' : dup ? 'Listed twice' : running[n] ? n + ' is already running: it will be opened, and nothing typed into it.' : '';
+            }
         }
-        window.addEventListener('resize', function() { closeProtoMenus(false); });
-
-        // ── Protocol menu of the Connect split button ──
-        function closeProtoMenus(refocus) {
-            document.querySelectorAll('.proto-menu-list:not([hidden])').forEach(function(m) {
-                m.hidden = true;
-                var t = m.parentNode.querySelector('[data-proto-toggle]');
-                if (t) {
-                    t.setAttribute('aria-expanded', 'false');
-                    if (refocus) t.focus();
-                }
-            });
+        function tsUpdate() {
+            tsMarkRunning();
+            var n = tsSpecs().length;
+            document.getElementById('ts-start').textContent = n > 1 ? 'Start ' + n + ' sessions' : 'Start';
         }
-        // Below the split button, right-aligned to it; flipped above it or
-        // pulled in when that would leave the viewport.
-        function placeProtoMenu(menu) {
-            var anchor = menu.parentNode.getBoundingClientRect();
-            var mw = menu.offsetWidth, mh = menu.offsetHeight;
-            var vw = document.documentElement.clientWidth, vh = document.documentElement.clientHeight;
-            var left = Math.min(anchor.right - mw, vw - mw - 8);
-            var top = anchor.bottom + 4;
-            if (top + mh > vh - 8) top = anchor.top - mh - 4 >= 8 ? anchor.top - mh - 4 : Math.max(8, vh - mh - 8);
-            menu.style.left = Math.max(8, left) + 'px';
-            menu.style.top = top + 'px';
+        function tsRenderPresets(selected) {
+            var sel = document.getElementById('ts-preset');
+            sel.innerHTML = '<option value="">New (not saved)</option>' + tsPresets.map(function(pr, i) {
+                return '<option value="' + i + '">' + escapeHtml(pr.name) + ' (' + pr.sessions.length + ')</option>';
+            }).join('');
+            sel.value = selected == null ? '' : String(selected);
+            document.getElementById('ts-preset-delete').hidden = sel.value === '';
         }
-        function openProtoMenu(toggle, focusLast) {
+        function openTmuxStart(sec, presetIndex) {
             closeProtoMenus(false);
-            var menu = toggle.parentNode.querySelector('.proto-menu-list');
-            menu.hidden = false;
-            toggle.setAttribute('aria-expanded', 'true');
-            placeProtoMenu(menu);
-            var items = menu.querySelectorAll('[role="menuitem"]');
-            if (items.length) items[focusLast ? items.length - 1 : 0].focus();
-        }
-        document.addEventListener('keydown', function(ev) {
-            var t = ev.target;
-            if (!t || !t.closest) return;
-            if (t.hasAttribute && t.hasAttribute('data-proto-toggle')) {
-                if (ev.key === 'ArrowDown' || ev.key === 'ArrowUp') {
-                    ev.preventDefault();
-                    openProtoMenu(t, ev.key === 'ArrowUp');
-                } else if (ev.key === 'Escape') {
-                    closeProtoMenus(true);
-                }
+            var key = sec.getAttribute('data-scope') + '/' + sec.getAttribute('data-folder') + '/' + sec.getAttribute('data-entry') + '/' + (sec.getAttribute('data-protocol') || '');
+            // Closed by a stray click or Escape: the rows typed so far are
+            // still there when it opens again for the same connection.
+            var keep = presetIndex == null && tsDraftKey === key;
+            tsDraftKey = key;
+            tsSec = sec.cloneNode(false);
+            tsSec._orig = sec;
+            tsPresets = (sec._tmuxPresets || []).slice();
+            var p = tmuxEntryOf(sec);
+            var target = ((p && p.username) ? p.username + '@' : '') + ((p && p.hostname) || sec.getAttribute('data-entry'))
+                + ' :' + ((p && p.port) || 22);
+            document.getElementById('ts-target').textContent = ((p && p.display_name) || sec.getAttribute('data-entry')) + ' · ' + target;
+            document.getElementById('ts-start').disabled = false;
+            if (keep) {
+                tsRenderPresets(document.getElementById('ts-preset').value || null);
+                tsUpdate();
+                document.getElementById('tmux-start-modal').classList.add('active');
                 return;
             }
-            var menu = t.closest('.proto-menu-list');
-            if (!menu) return;
-            var items = Array.prototype.slice.call(menu.querySelectorAll('[role="menuitem"]'));
-            var i = items.indexOf(t);
-            if (ev.key === 'ArrowDown') { ev.preventDefault(); items[(i + 1) % items.length].focus(); }
-            else if (ev.key === 'ArrowUp') { ev.preventDefault(); items[(i - 1 + items.length) % items.length].focus(); }
-            else if (ev.key === 'Home') { ev.preventDefault(); items[0].focus(); }
-            else if (ev.key === 'End') { ev.preventDefault(); items[items.length - 1].focus(); }
-            else if (ev.key === 'Escape') { ev.preventDefault(); ev.stopPropagation(); closeProtoMenus(true); }
-            else if (ev.key === 'Tab') { closeProtoMenus(false); }
-        }, true);
-        // A fixed menu follows its button when the page scrolls, and closes
-        // once the button has scrolled out of sight.
-        document.addEventListener('scroll', function(ev) {
-            if (ev.target && ev.target.closest && ev.target.closest('.proto-menu-list')) return;
-            document.querySelectorAll('.proto-menu-list:not([hidden])').forEach(function(m) {
-                var a = m.parentNode.getBoundingClientRect();
-                if (a.bottom < 0 || a.top > document.documentElement.clientHeight) closeProtoMenus(false);
-                else placeProtoMenu(m);
+            document.getElementById('ts-text-view').hidden = true;
+            document.getElementById('ts-rows-view').hidden = false;
+            document.getElementById('ts-results').innerHTML = '';
+            document.getElementById('ts-error').textContent = '';
+            document.getElementById('ts-saved').textContent = '';
+            var pr = presetIndex != null ? tsPresets[presetIndex] : null;
+            tsRenderPresets(pr ? presetIndex : null);
+            document.getElementById('ts-save-name').value = pr ? pr.name : '';
+            tsSetRows(pr ? pr.sessions : null);
+            document.getElementById('ts-start').disabled = false;
+            document.getElementById('tmux-start-modal').classList.add('active');
+            var first = tsRowsEl().querySelector('.ts-name');
+            if (first) first.focus();
+        }
+        function closeTmuxStart() { document.getElementById('tmux-start-modal').classList.remove('active'); }
+        // What this page does for a Connect menu's tmux section (connect-menu.js),
+        // given how to find the section's entry. The global search uses
+        // the same on this page (window.rgTmuxHooks).
+        function tmuxHooks(entryOf) {
+            return {
+                entryOf: entryOf,
+                // Credentials typed at connect are never kept, so the
+                // workspace could not reconnect: a normal session tab
+                // attached to the first session instead.
+                onPrompt: function(p, sec, names, btn) {
+                    var proto = sec.getAttribute('data-protocol');
+                    showCredPrompt(p, sec.getAttribute('data-scope'), sec.getAttribute('data-folder'), btn, false);
+                    pendingConnect.extra = { tmux_session: names[0] };
+                    if (proto) pendingConnect.extra.protocol = proto;
+                },
+                onAdvanced: function(sec) { openTmuxStart(sec, null); },
+                onError: showError,
+                onSessions: tsMarkRunning
+            };
+        }
+        window.rgTmuxHooks = tmuxHooks;
+        // The Advanced dialog asked for from another page's search
+        // (#open=…&tmux-start=entry&protocol=…): opened once the folder's
+        // entries are on the page, with the connection's saved starts.
+        var pendingTmuxStart = null;
+        function pendingTmuxSection(want) {
+            var secs = document.querySelectorAll('#entries-content .tmux-section');
+            for (var i = 0; i < secs.length; i++) {
+                if (secs[i].getAttribute('data-entry') === want.entry && (secs[i].getAttribute('data-protocol') || '') === want.protocol) return secs[i];
+            }
+            return null;
+        }
+        function maybeOpenPendingTmuxStart(scope, folder) {
+            var want = pendingTmuxStart;
+            if (!want || want.scope !== scope || want.folder !== folder) return;
+            var sec = pendingTmuxSection(want);
+            if (!sec) return;
+            pendingTmuxStart = null;
+            var presets = [];
+            fetch(tmuxEntryUrl(sec) + '/tmux/presets' + tmuxProtoQuery(sec), { headers: apiHeaders(), credentials: 'same-origin' })
+                .then(tmuxJson)
+                .then(function(r) { if (r.ok) presets = r.j.presets || []; })
+                .catch(function() {})
+                .then(function() {
+                    // The table may have been drawn again meanwhile.
+                    var now = pendingTmuxSection(want);
+                    if (!now) return;
+                    now._tmuxPresets = presets;
+                    openTmuxStart(now, null);
+                });
+        }
+        document.getElementById('ts-add').addEventListener('click', function() { tsAddRow(null, true); });
+        // Pasting several lines into any row reads them as the text format,
+        // one session per line: the batch replaces the empty rows and is
+        // added after the filled ones.
+        tsRowsEl().addEventListener('paste', function(ev) {
+            var text = (ev.clipboardData || window.clipboardData).getData('text');
+            if (!text || !/\n/.test(text.trim())) return;
+            var specs = tsParseText(text);
+            if (!specs.length) return;
+            ev.preventDefault();
+            tsSetRows(tsReadRows().concat(specs));
+        });
+        document.getElementById('ts-as-text').addEventListener('click', function() {
+            document.getElementById('ts-text').value = tsToText(tsReadRows());
+            document.getElementById('ts-rows-view').hidden = true;
+            document.getElementById('ts-text-view').hidden = false;
+            document.getElementById('ts-text').focus();
+            tsUpdate();
+        });
+        document.getElementById('ts-as-rows').addEventListener('click', function() {
+            var specs = tsParseText(document.getElementById('ts-text').value);
+            document.getElementById('ts-text-view').hidden = true;
+            document.getElementById('ts-rows-view').hidden = false;
+            tsSetRows(specs);
+        });
+        document.getElementById('ts-text').addEventListener('input', tsUpdate);
+        document.getElementById('ts-preset').addEventListener('change', function() {
+            var i = this.value === '' ? null : parseInt(this.value, 10);
+            var pr = i == null ? null : tsPresets[i];
+            document.getElementById('ts-preset-delete').hidden = !pr;
+            document.getElementById('ts-save-name').value = pr ? pr.name : '';
+            document.getElementById('ts-results').innerHTML = '';
+            document.getElementById('ts-error').textContent = '';
+            document.getElementById('ts-text-view').hidden = true;
+            document.getElementById('ts-rows-view').hidden = false;
+            tsSetRows(pr ? pr.sessions : null);
+        });
+        function tsSavePresets(list, selected, note) {
+            var errEl = document.getElementById('ts-error');
+            errEl.textContent = '';
+            return fetch(tmuxEntryUrl(tsSec) + '/tmux/presets' + tmuxProtoQuery(tsSec), {
+                method: 'PUT', credentials: 'same-origin',
+                headers: apiHeaders({ 'Content-Type': 'application/json' }),
+                body: JSON.stringify({ presets: list })
+            })
+                .then(tmuxJson)
+                .then(function(r) {
+                    if (!r.ok) { errEl.textContent = r.j.error || 'The presets could not be saved.'; return; }
+                    tsPresets = r.j.presets || [];
+                    tsRenderPresets(selected);
+                    document.getElementById('ts-saved').textContent = note;
+                    // The menu shows them next time it opens.
+                    document.querySelectorAll('.tmux-section').forEach(function(sec) {
+                        if (sec.getAttribute('data-entry') === tsSec.getAttribute('data-entry') && sec.getAttribute('data-protocol') === tsSec.getAttribute('data-protocol')) {
+                            sec._tmuxPresets = tsPresets; renderTmuxPresets(sec);
+                        }
+                    });
+                })
+                .catch(function() { errEl.textContent = 'The presets could not be saved.'; });
+        }
+        document.getElementById('ts-save').addEventListener('click', function() {
+            var errEl = document.getElementById('ts-error');
+            var name = document.getElementById('ts-save-name').value.trim();
+            var specs = tsSpecs();
+            var problem = tsProblem(specs);
+            if (!name) { errEl.textContent = 'Name the preset first.'; document.getElementById('ts-save-name').focus(); return; }
+            if (problem) { errEl.textContent = problem; return; }
+            var list = tsPresets.slice(), at = -1;
+            for (var i = 0; i < list.length; i++) if (list[i].name === name) at = i;
+            var pr = { name: name, sessions: specs };
+            if (at >= 0) list[at] = pr; else { list.push(pr); at = list.length - 1; }
+            tsSavePresets(list, at, 'Saved. It is in the Connect menu too.');
+        });
+        document.getElementById('ts-preset-delete').addEventListener('click', function() {
+            var sel = document.getElementById('ts-preset');
+            var i = parseInt(sel.value, 10);
+            var pr = tsPresets[i];
+            if (!pr) return;
+            rgConfirm('Delete the preset ' + pr.name + '? Its sessions on the host are not touched.', { danger: true, confirmText: 'Delete preset' }).then(function(ok) {
+                if (!ok) return;
+                var list = tsPresets.slice();
+                list.splice(i, 1);
+                tsSavePresets(list, null, 'Deleted ' + pr.name + '.');
             });
-        }, true);
-
+        });
+        document.getElementById('ts-cancel').addEventListener('click', closeTmuxStart);
+        document.getElementById('ts-start').addEventListener('click', function() {
+            var btn = this;
+            var errEl = document.getElementById('ts-error'), res = document.getElementById('ts-results');
+            var specs = tsSpecs();
+            var problem = tsProblem(specs);
+            errEl.textContent = ''; res.innerHTML = '';
+            if (problem) { errEl.textContent = problem; return; }
+            btn.disabled = true;
+            btn.textContent = 'Starting…';
+            tmuxStartAndOpen(tsSec, specs, function(r) {
+                btn.disabled = false;
+                tsUpdate();
+                if (r.error) { errEl.textContent = r.error; return; }
+                var lines = tmuxStartLines(r.sessions);
+                if (!lines.some(function(l) { return l.bad; })) { tsDraftKey = null; closeTmuxStart(); return; }
+                res.innerHTML = lines.map(function(l) {
+                    return '<div' + (l.bad ? ' class="err"' : '') + '><b>' + escapeHtml(l.name) + '</b>: ' + escapeHtml(l.text) + '</div>';
+                }).join('');
+            });
+        });
         function entryTypes(e) {
             var out = [];
             entryProtocols(e).forEach(function(p) { if (out.indexOf(p.session_type) < 0) out.push(p.session_type); });
@@ -3287,27 +3755,16 @@
                 html += '<td>' + userCol + '</td>';
                 var connectLabel = needsPrompt ? 'Login...' : 'Connect';
                 var protoAttr = e.protocol ? ' data-protocol="' + escapeAttr(e.protocol) + '"' : '';
-                var connectBtn = '<button class="btn-connect' + (protos.length > 1 ? ' split-main' : '') + '" data-connect="' + escapeAttr(e.name) + '" data-scope="' + escapeAttr(scope) + '" data-folder="' + escapeAttr(folder) + '"' + protoAttr + '>' + connectLabel + '</button>';
+                // SSH protocols offering tmux sessions (#325) get a section
+                // of the menu, so even a one-protocol entry gets the menu.
+                var hasMenu = CM.hasMenu(e);
+                var connectBtn = '<button class="btn-connect' + (hasMenu ? ' split-main' : '') + '" data-connect="' + escapeAttr(e.name) + '" data-scope="' + escapeAttr(scope) + '" data-folder="' + escapeAttr(folder) + '"' + protoAttr + '>' + connectLabel + '</button>';
                 html += '<td class="connect-cell">';
-                if (protos.length > 1) {
+                if (hasMenu) {
                     // Split button: Connect opens the primary, the toggle a
-                    // menu of every protocol.
-                    var menuId = 'proto-menu-' + idx;
-                    html += '<span class="split-btn">' + connectBtn
-                        + '<button class="btn-connect split-toggle" data-proto-toggle="1" aria-haspopup="menu" aria-expanded="false" aria-controls="' + menuId + '" aria-label="Choose a protocol" title="Choose a protocol">&#9662;</button>'
-                        + '<div class="proto-menu-list" id="' + menuId + '" role="menu" aria-label="Protocols" hidden>'
-                        + protos.map(function(p, pi) {
-                            var nm = p.protocol || p.session_type;
-                            var port = protoPort(p);
-                            return '<button type="button" class="proto-item" role="menuitem" tabindex="-1" data-connect="' + escapeAttr(e.name) + '" data-scope="' + escapeAttr(scope) + '" data-folder="' + escapeAttr(folder) + '" data-protocol="' + escapeAttr(nm) + '">'
-                                + '<span class="type-badge type-' + escapeAttr(p.session_type) + '">' + escapeHtml(p.session_type.toUpperCase()) + '</span>'
-                                + (nm !== p.session_type ? '<span class="pi-name">' + escapeHtml(nm) + '</span>' : '')
-                                + (pi === 0 ? '<span class="pi-default">default</span>' : '')
-                                + (protoDetail(p) ? '<span class="pi-detail">' + escapeHtml(protoDetail(p)) + '</span>' : '')
-                                + (port ? '<span class="pi-port">:' + escapeHtml(String(port)) + '</span>' : '')
-                                + '</button>';
-                        }).join('')
-                        + '</div></span>';
+                    // menu of every protocol and of each tmux-enabled SSH
+                    // protocol's sessions.
+                    html += '<span class="split-btn">' + connectBtn + CM.menuHtml(e, scope, folder, 'proto-menu-' + idx, 'data-connect') + '</span>';
                 } else {
                     html += connectBtn;
                 }
@@ -3328,6 +3785,7 @@
 
             html += '</tbody></table>';
             content.innerHTML = html;
+            maybeOpenPendingTmuxStart(scope, folder);
             updateBulkBar();
         }
 
@@ -3816,6 +4274,7 @@
             if (u) body.username = u;
             var d = document.getElementById('cred-domain').value.trim();
             if (d) body.domain = d;
+            if (pendingConnect.extra) { for (var xk in pendingConnect.extra) body[xk] = pendingConnect.extra[xk]; }
             document.getElementById('cred-modal').classList.remove('active');
             doConnect(pendingConnect.scope, pendingConnect.folder, pendingConnect.name, pendingConnect.btn, body, pendingConnect.newWindow);
             pendingConnect = null;
@@ -3827,20 +4286,11 @@
         });
 
         // Connect / clone / delete / edit actions for the folder entries table.
-        // Close an open protocol menu on a click anywhere outside it.
-        document.addEventListener('click', function(ev) {
-            if (ev.target.closest && ev.target.closest('.split-btn')) return;
-            closeProtoMenus(false);
-        });
-
         function handleEntryActionsClick(e) {
             var btn = e.target.closest ? (e.target.closest('button') || e.target) : e.target;
 
-            if (btn.getAttribute && btn.getAttribute('data-proto-toggle')) {
-                if (btn.getAttribute('aria-expanded') === 'true') closeProtoMenus(true);
-                else openProtoMenu(btn, false);
-                return;
-            }
+            // The Connect menu's toggle and its tmux items (#325).
+            if (CM.handleClick(e)) return;
 
             if (btn.getAttribute('data-connect') || btn.getAttribute('data-connect-win')) {
                 var newWindow = !!btn.getAttribute('data-connect-win');
@@ -3926,6 +4376,11 @@
             }
         }
         document.getElementById('entries-content').addEventListener('click', handleEntryActionsClick);
+        CM.bind(document.getElementById('entries-content'), tmuxHooks(function(sec) {
+            var name = sec.getAttribute('data-entry');
+            for (var i = 0; i < currentEntries.length; i++) if (currentEntries[i].name === name) return currentEntries[i];
+            return null;
+        }));
 
         // ── Folder modal ──
 
@@ -4988,6 +5443,7 @@
                 if (pk) entry.private_key = pk;
                 var fs = parseInt(document.getElementById('em-ssh-font-size').value);
                 if (fs > 0) entry.ssh_font_size = fs;
+                if (document.getElementById('em-ssh-tmux').checked) entry.tmux = true;
                 if (document.getElementById('em-ssh-prompt-creds').checked) entry.prompt_credentials = true;
             } else if (type === 'rdp') {
                 var h = document.getElementById('em-rdp-hostname').value.trim();
@@ -5202,6 +5658,7 @@
                     document.getElementById('em-port').value = entryData.port || '22';
                     document.getElementById('em-username').value = entryData.username || '';
                     document.getElementById('em-ssh-font-size').value = entryData.ssh_font_size || '';
+                    document.getElementById('em-ssh-tmux').checked = !!entryData.tmux;
                     document.getElementById('em-ssh-prompt-creds').checked = !!entryData.prompt_credentials;
                 } else if (type === 'rdp') {
                     document.getElementById('em-rdp-hostname').value = entryData.hostname || '';
@@ -5448,6 +5905,7 @@
             document.getElementById('em-proxmox-monitors').value = '1';
             document.getElementById('em-proxmox-verify-tls').checked = false;
             document.getElementById('em-ssh-font-size').value = '';
+            document.getElementById('em-ssh-tmux').checked = false;
             document.getElementById('em-wol-enabled').checked = false;
             document.getElementById('em-wol-mac').value = '';
             document.getElementById('em-wol-broadcast').value = '';

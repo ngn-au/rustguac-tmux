@@ -448,6 +448,37 @@ home_base = "/vdi-homes"
 # allowed_images = ["myregistry/desktop:latest"]
 ```
 
+## `[tmux]` section
+
+The repo list of the tmux workspace and the dashboard. Optional; see [tmux Workspace and Dashboard](tmux-workspace.md).
+
+| Setting | Default | Description |
+|---|---|---|
+| `repos_dir` | `"GitLab"` | Folder under each login's home directory whose git repos are listed. Letters, digits and `. _ - /` |
+| `repo_forge` | (none) | List only repos whose `origin` is on this host name. Empty lists every repo |
+| `repo_command` | (none) | Startup command offered for a session started from a repo, until a person sets their own. `{repo}`, `{session}`, `{path}` and `{rel}` are filled in, e.g. `claude -n {repo}` |
+
+## `[workbench]` section
+
+A personal folder, SSH entry and console-only key for every member of a Unix group on one shared host. Optional; see [tmux Workspace and Dashboard](tmux-workspace.md#4-workbench-a-personal-entry-for-everyone-on-a-shared-server).
+
+| Setting | Default | Description |
+|---|---|---|
+| `host` | (required) | Address the entries connect to, and the sync logs in to |
+| `port` | `22` | SSH port |
+| `host_label` | `host` | The host's name, used for the entry's name and title |
+| `group` | (required) | Unix group whose members get a work bench, as the host resolves it |
+| `admin_entry` | (required) | `scope/folder/entry` of an existing entry (a root login) whose credentials the sync uses |
+| `console_from` | (required) | This console's address as the host sees it; becomes `from="..."` on the keys |
+| `email_domain` | (required) | A member's email is their Unix user's local part + `@` + this |
+| `user_suffix` | `""` | Unix user = email local part + this |
+| `folder_prefix` | `"wb-"` | Folder key = this + the email with `@` and `.` as `-` |
+| `display_name` | `"Work Bench"` | Folder title, followed by the person's email |
+| `key_marker` | `"rustguac-console"` | Comment marking the console's keys in `authorized_keys`. Do not change once keys are installed |
+| `scope` | `"shared"` | Vault scope the folders are created in |
+| `interval_mins` | `0` | Sync in the server every this many minutes; `0` = only `rustguac workbench-sync` |
+| `remove_departed` | `true` | Remove the folder and key of someone no longer in the group |
+
 ## Environment variables
 
 | Variable | Description |

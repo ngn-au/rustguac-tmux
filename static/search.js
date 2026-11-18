@@ -8,7 +8,10 @@
  * On the connections page, opening a folder from a result selects it in the
  * sidebar in place (via window.rgSelectFolder) instead of navigating; the
  * loaded index is also exposed as window.rgSearchIndex for that page's
- * credentials banner. Depends on rgFilters (filters.js), loaded on demand.
+ * credentials banner. Depends on rgFilters (filters.js) and rgConnectMenu
+ * (connect-menu.js), each loaded on demand: a result's Connect has the same
+ * menu as on the connections page, of every protocol and of the host's tmux
+ * sessions.
  *
  * Only an authenticated operator or above gets the box: the server writes the
  * caller's role on <html data-role-level> (0 anonymous ... 4 admin), and an
@@ -299,7 +302,7 @@
         var max = 50, more = matches.length - max, shown = matches.slice(0, max);
         var html = '<table class="entries-table search-results"><colgroup><col class="c-name"><col class="c-type"><col class="c-host"><col class="c-user"><col class="c-folder"><col class="c-actions"></colgroup>' +
             '<thead><tr><th>Name</th><th>Type</th><th>Host</th><th>User</th><th>Folder</th><th></th></tr></thead><tbody>';
-        shown.forEach(function (m) {
+        shown.forEach(function (m, i) {
             var r = m.row, e = r.entry;
             var typeLabel = e.session_type.toUpperCase();
             var typeCls = 'type-' + attr(e.session_type);
@@ -315,7 +318,7 @@
                 '<td>' + userCol + '</td>' +
                 '<td class="folder-cell" title="' + attr(r.scope + '/' + r.folderPath) + '"><span class="fname"><span class="folder-scope">' + scopeIcon + '</span>' + highlight(fName, tokens) + '</span>' +
                 (fName !== r.folderPath ? '<span class="fkey">' + highlight(r.folderPath, tokens) + '</span>' : '') + '</td>' +
-                '<td class="actions-cell"><button class="btn-connect" data-sc-connect="' + attr(e.name) + '" data-scope="' + attr(r.scope) + '" data-folder="' + attr(r.folderPath) + '">' + connectLabel + '</button>' +
+                '<td class="actions-cell">' + connectHtml(r, e, connectLabel, i) +
                 '<button class="btn-connect btn-connect-win" title="Open in a new window" data-sc-connect="' + attr(e.name) + '" data-scope="' + attr(r.scope) + '" data-folder="' + attr(r.folderPath) + '">⧉</button>' +
                 '<a href="#" class="search-open-folder" data-open-scope="' + attr(r.scope) + '" data-open-folder="' + attr(r.folderPath) + '" title="Open this folder">folder ↗</a></td>' +
                 '</tr>';
@@ -326,14 +329,55 @@
         content.scrollTop = 0;
     }
 
-    // The protocols after the primary, each a small button that connects
-    // with it (#296).
+    // The protocols after the primary (#296); the Connect menu connects
+    // with them.
     function extraProtos(r, e) {
         var ps = (e.protocols && e.protocols.length) ? e.protocols : [e];
         return ps.slice(1).map(function (p) {
             var nm = p.protocol || p.session_type;
-            return ' <button class="type-badge type-' + attr(p.session_type) + '" style="cursor:pointer;border:0;opacity:0.8" title="Connect with ' + attr(nm) + '" data-sc-connect="' + attr(e.name) + '" data-scope="' + attr(r.scope) + '" data-folder="' + attr(r.folderPath) + '" data-protocol="' + attr(nm) + '">' + esc(p.session_type.toUpperCase()) + '</button>';
+            return ' <span class="type-badge type-' + attr(p.session_type) + '" style="opacity:0.8" title="' + attr(nm) + '">' + esc(p.session_type.toUpperCase()) + '</span>';
         }).join('');
+    }
+    // Connect, and beside it the connections page's Connect menu when the
+    // entry has one: every protocol, and the tmux sessions of each SSH
+    // protocol with tmux on (connect-menu.js).
+    function connectHtml(r, e, label, i) {
+        var cm = window.rgConnectMenu, menu = !!(cm && cm.hasMenu(e));
+        var btn = '<button class="btn-connect' + (menu ? ' split-main' : '') + '" data-sc-connect="' + attr(e.name) + '" data-scope="' + attr(r.scope) + '" data-folder="' + attr(r.folderPath) + '">' + label + '</button>';
+        return menu ? '<span class="split-btn">' + btn + cm.menuHtml(e, r.scope, r.folderPath, 'search-menu-' + i, 'data-sc-connect') + '</span>' : btn;
+    }
+    function rowOf(scope, folder, name) {
+        var si = searchIndex || [];
+        for (var k = 0; k < si.length; k++) { if (si[k].scope === scope && si[k].folderPath === folder && si[k].entry.name === name) return si[k]; }
+        return null;
+    }
+    // What the results' tmux sections do. On the connections page, what the
+    // page does, after closing the overlay; elsewhere, credentials typed at
+    // connect and the Advanced dialog are on the connections page, so they
+    // go there.
+    function tmuxHooks() {
+        var entryOf = function (sec) {
+            var row = rowOf(sec.getAttribute('data-scope'), sec.getAttribute('data-folder'), sec.getAttribute('data-entry'));
+            return row ? row.entry : null;
+        };
+        if (typeof window.rgTmuxHooks === 'function') {
+            var h = window.rgTmuxHooks(entryOf);
+            return {
+                entryOf: entryOf, onError: h.onError, onSessions: h.onSessions,
+                onPrompt: function (p, sec, names, btn) { close(); h.onPrompt(p, sec, names, btn); },
+                onAdvanced: function (sec) { close(); h.onAdvanced(sec); }
+            };
+        }
+        return {
+            entryOf: entryOf,
+            onError: function (m) { if (window.rgAlert) window.rgAlert(m); },
+            onPrompt: function (p, sec) { openFolder(sec.getAttribute('data-scope'), sec.getAttribute('data-folder')); },
+            onAdvanced: function (sec) {
+                var proto = sec.getAttribute('data-protocol');
+                location.href = '/connections.html#open=' + encodeURIComponent(sec.getAttribute('data-scope') + '/' + sec.getAttribute('data-folder'))
+                    + '&tmux-start=' + encodeURIComponent(sec.getAttribute('data-entry')) + (proto ? '&protocol=' + encodeURIComponent(proto) : '');
+            }
+        };
     }
     // An entry's info for one protocol (none: the entry, i.e. its primary).
     function protoInfo(e, name) {
@@ -570,16 +614,18 @@
             if ((gs && gs.contains(e.target)) || (panel && panel.contains(e.target))) return;
             close();
         }, true);
+        window.rgConnectMenu.bind(document.getElementById('search-results'), tmuxHooks());
         document.getElementById('search-results').addEventListener('click', function (e) {
             var t = e.target;
+            if (window.rgConnectMenu.handleClick(e)) return;
             var open = t.closest && t.closest('.search-open-folder');
             if (open) { e.preventDefault(); openFolder(open.getAttribute('data-open-scope'), open.getAttribute('data-open-folder')); return; }
             var conn = t.closest && t.closest('[data-sc-connect]');
             if (conn) {
                 e.preventDefault();
+                window.rgConnectMenu.close(false);
                 var sc = conn.getAttribute('data-scope'), fo = conn.getAttribute('data-folder'), nm = conn.getAttribute('data-sc-connect');
-                var row = null, si = searchIndex || [];
-                for (var k = 0; k < si.length; k++) { if (si[k].scope === sc && si[k].folderPath === fo && si[k].entry.name === nm) { row = si[k]; break; } }
+                var row = rowOf(sc, fo, nm);
                 var fsoc = row && row.entry && protoInfo(row.entry, btnProtocol(conn)).fullscreen_on_connect;
                 // The regular Connect goes zero-click fullscreen in this tab; the
                 // ⧉ button is an explicit "open in a new window", so it keeps the
@@ -595,6 +641,8 @@
             if (e.key !== 'Escape') return;
             if (!searchEngaged && !overlay().classList.contains('open')) return;
             if (document.querySelector('#search-overlay .rg-facet.open')) return; // let the facet menu close first
+            // An open Connect menu closes first.
+            if (window.rgConnectMenu && window.rgConnectMenu.isOpen()) { e.preventDefault(); e.stopPropagation(); window.rgConnectMenu.close(true); return; }
             e.preventDefault(); e.stopPropagation(); close();
         }, true);
         // "/" focuses the search unless typing in a field or a modal is open.
@@ -691,11 +739,15 @@
             wire();
             loadIndex(who);
         };
-        if (window.rgFilters) { mkFilters(); }
-        else {
-            var s = document.createElement('script'); s.src = '/filters.js';
-            s.onload = mkFilters; document.head.appendChild(s);
-        }
+        // filters.js and connect-menu.js, each loaded unless the page has it.
+        var need = [['rgFilters', '/filters.js'], ['rgConnectMenu', '/connect-menu.js']].filter(function (d) { return !window[d[0]]; });
+        var left = need.length;
+        if (!left) { mkFilters(); return; }
+        need.forEach(function (d) {
+            var s = document.createElement('script'); s.src = d[1];
+            s.onload = function () { if (--left === 0) mkFilters(); };
+            document.head.appendChild(s);
+        });
     }
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start);
     else start();

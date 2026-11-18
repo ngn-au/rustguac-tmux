@@ -298,3 +298,37 @@ web_allowed_networks = ["127.0.0.0/8", "::1/128"]
 
 # [rdp]
 # default_auth_pkg = "ntlm"
+
+# ── tmux workspace: the repo list ──
+# The tmux workspace and the dashboard list the git repos under one folder of
+# each login's home, with a dot for the ones a tmux session is running in.
+# [tmux]
+# repos_dir = "GitLab"             # ~/GitLab (the default)
+# repo_forge = "git.example.com"   # only repos cloned from this host; default: all
+# # The startup command offered for a session started from a repo, until a
+# # person sets their own in the workspace. {repo} = the repo folder's name,
+# # {session} = the tmux session's name, {path} = the folder, {rel} = the
+# # folder under repos_dir. This one starts Claude Code named after the repo:
+# repo_command = "claude -n {repo}"
+
+# ── Work bench folders ──
+# For a shared Linux server people work on. Every member of `group` on that
+# host gets a folder visible only to them, an SSH entry to the host as their
+# own user (tmux on) and a console-only key in their ~/.ssh/authorized_keys
+# (from= the console's address). People who leave the group lose both.
+# `rustguac workbench-sync --dry-run` shows what it would do. The host is
+# reached with `admin_entry`'s credentials (a root login). See
+# docs/tmux-workspace.md.
+# [workbench]
+# host = "192.0.2.10"
+# host_label = "bench.example.com"
+# group = "bench-users"
+# admin_entry = "shared/servers/bench.example.com"   # scope/folder/entry
+# console_from = "198.51.100.7"    # this console, as the host sees it
+# email_domain = "example.com"     # email = Unix user's local part + @ + this
+# user_suffix = ""                 # Unix user = email local part + this
+# folder_prefix = "wb-"
+# display_name = "Work Bench"
+# key_marker = "rustguac-console"  # marks the console's keys; don't change once in use
+# interval_mins = 15               # 0 = only on demand
+# remove_departed = true

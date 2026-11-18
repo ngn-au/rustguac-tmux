@@ -1,0 +1,801 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>tmux</title>
+    <link rel="stylesheet" href="/rustguac.css">
+    <style>
+        /* The tmux workspace (#325): one browser tab holding every tmux
+           session of one SSH connection as tabs, or side by side. Each tab is
+           the session client in a frame, attached to its tmux session, and
+           reconnects on its own when the connection drops. */
+        html, body { height: 100%; }
+        body { padding: 0; display: flex; flex-direction: column; overflow: hidden; font-size: var(--fz-sm); line-height: 1.4; }
+        #bar {
+            display: flex; align-items: flex-start; gap: var(--s-2); flex: none;
+            padding: 6px var(--s-2); background: var(--surface); border-bottom: 1px solid var(--border);
+        }
+        #bar button, #add-pop button { font-family: inherit; cursor: pointer; }
+        .bar-btn {
+            height: 28px; min-width: 28px; padding: 0 var(--s-2); margin: 0; flex: none;
+            background: transparent; color: var(--text-muted); border: 1px solid var(--border);
+            border-radius: var(--radius); font-size: var(--fz-xs); line-height: 1;
+        }
+        .bar-btn:hover, .bar-btn:focus-visible { color: var(--text); border-color: var(--accent); outline: none; }
+        .bar-btn[aria-pressed="true"] { color: var(--bg); background: var(--accent); border-color: var(--accent); }
+        #who { display: flex; align-items: center; gap: var(--s-2); height: 28px; flex: none; max-width: 30%; min-width: 0; }
+        #who-name { font-weight: bold; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        #who-host { color: var(--text-muted); font-size: var(--fz-xs); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .tmux-badge {
+            flex: none; font-size: 10.5px; line-height: 16px; padding: 1px 5px; letter-spacing: 0.06em;
+            border-radius: var(--radius); background: var(--type-ssh-bg); color: var(--type-ssh-fg); font-weight: bold;
+        }
+        /* Tabs wrap onto as many rows as they need: nothing is hidden behind
+           a scroll or a "more" menu, however many sessions are open. Every
+           tab is the same width, in columns, whatever its session is called;
+           a long name is cut short (the whole name is the tab's tooltip). */
+        #tabs { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 190px)); gap: 4px; flex: 1; min-width: 0; align-content: flex-start; }
+        .tab {
+            display: flex; align-items: center; gap: 6px; height: 28px; min-width: 0;
+            padding: 0 4px 0 var(--s-2); box-sizing: border-box;
+            background: var(--bg); color: var(--text-muted); border: 1px solid var(--border);
+            border-radius: var(--radius); cursor: pointer; user-select: none;
+        }
+        .tab:hover { color: var(--text); }
+        .tab.active { color: var(--text); border-color: var(--accent); box-shadow: inset 0 -2px 0 var(--accent); }
+        .tab:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+        .tab-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .tab-num { color: var(--text-dim); font-size: 11px; }
+        .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--text-dim); }
+        .s-live .dot { background: var(--status-active); }
+        .s-connecting .dot, .s-reconnecting .dot { background: var(--status-pending); animation: pulse 1s ease-in-out infinite; }
+        .s-detached .dot { background: var(--status-completed); }
+        .s-error .dot { background: var(--status-error); }
+        @keyframes pulse { 50% { opacity: 0.3; } }
+        .tab-x {
+            width: 20px; height: 20px; padding: 0; margin: 0; flex: none; border: 0; border-radius: var(--radius);
+            background: transparent; color: var(--text-dim); font-size: 14px; line-height: 20px;
+        }
+        .tab-x:hover { background: var(--input); color: var(--text); }
+        #tools { display: flex; gap: 4px; flex: none; align-items: center; }
+
+        /* Panes. Tabs: every pane fills the area and only the active one is
+           shown (hidden panes keep their size, so a session never resizes
+           when switching). Split: a grid of every pane. */
+        #panes { position: relative; flex: 1; min-height: 0; background: #000; }
+        .pane { position: absolute; inset: 0; background: var(--bg); }
+        .layout-tabs .pane:not(.active) { visibility: hidden; }
+        .layout-split #panes { display: grid; gap: 2px; background: var(--border); }
+        .layout-split .pane { position: relative; inset: auto; min-width: 0; min-height: 0; outline: 1px solid transparent; }
+        .layout-split .pane.active { outline: 1px solid var(--accent); z-index: 1; }
+        .pane iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; display: block; }
+        .pane-label {
+            display: none; position: absolute; top: 0; right: 0; z-index: 2; pointer-events: none;
+            padding: 1px 6px; font-size: 11px; color: var(--text-muted); background: color-mix(in srgb, var(--bg) 80%, transparent);
+        }
+        .layout-split .pane-label { display: block; }
+        .pane.active .pane-label { color: var(--accent); }
+        /* What a pane is doing when it is not showing its session. */
+        .pane-cover {
+            position: absolute; inset: 0; z-index: 3; display: none; align-items: center; justify-content: center;
+            background: color-mix(in srgb, var(--bg) 88%, transparent); text-align: center; padding: var(--s-4);
+        }
+        .pane-cover.on { display: flex; }
+        .pane-cover h3 { margin: 0 0 var(--s-2); color: var(--text); font-size: var(--fz-md); }
+        .pane-cover p { margin: 0 0 var(--s-3); color: var(--text-muted); max-width: 34em; }
+        .pane-cover .err { color: var(--status-error); }
+        .pane-cover .btns { display: flex; gap: var(--s-2); justify-content: center; flex-wrap: wrap; }
+        .pane-cover button {
+            height: 32px; padding: 0 var(--s-3); border-radius: var(--radius); border: 1px solid var(--accent);
+            background: transparent; color: var(--accent); font-family: inherit; font-size: var(--fz-xs); cursor: pointer;
+        }
+        .pane-cover button.primary { background: var(--accent); color: var(--bg); }
+        .pane-cover button.danger { border-color: var(--status-error); color: var(--status-error); }
+        .spinner {
+            width: 26px; height: 26px; margin: 0 auto var(--s-3); border: 3px solid var(--border);
+            border-top-color: var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        #empty { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; color: var(--text-muted); text-align: center; }
+        #empty.on { display: flex; }
+
+        /* The + popover: the host's sessions and a name to open. */
+        #add-pop {
+            position: fixed; z-index: 20; width: 440px; max-width: calc(100vw - 16px); box-sizing: border-box; max-height: calc(100vh - 60px); overflow: auto;
+            background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+            box-shadow: 0 8px 28px rgba(0,0,0,.45); padding: var(--s-1);
+        }
+        #add-pop[hidden], #add-pop [hidden] { display: none !important; }
+        .pop-head { display: flex; align-items: center; gap: var(--s-2); padding: 4px var(--s-2); color: var(--text-muted); font-size: var(--fz-xs); text-transform: uppercase; letter-spacing: 0.08em; }
+        .pop-head .grow { flex: 1; }
+        .pop-msg { padding: var(--s-2); color: var(--text-muted); font-size: var(--fz-xs); }
+        .pop-msg.err { color: var(--status-error); }
+        .pop-item {
+            display: flex; align-items: center; gap: var(--s-2); width: 100%; padding: 5px var(--s-2); margin: 0;
+            background: transparent; border: 0; border-radius: var(--radius); color: var(--text); font-size: var(--fz-xs); text-align: left;
+        }
+        .pop-item:hover, .pop-item:focus { background: var(--input); outline: none; }
+        .pop-item[disabled] { opacity: 0.5; cursor: default; }
+        .pop-item .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .pop-item .meta { margin-left: auto; color: var(--text-muted); white-space: nowrap; }
+        .pop-new { display: flex; gap: 4px; padding: var(--s-2); border-top: 1px solid var(--border); margin-top: 4px; }
+        .pop-new input { flex: 1; min-width: 0; height: 30px; box-sizing: border-box; padding: 0 var(--s-2); font-family: inherit; font-size: var(--fz-xs); background: var(--input); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius); }
+        .pop-new input:focus { outline: none; border-color: var(--accent); }
+        .pop-new button { height: 30px; padding: 0 var(--s-3); border: 0; border-radius: var(--radius); background: var(--accent); color: var(--bg); font-size: var(--fz-xs); }
+        /* Search, and the repos in ~/GitLab. */
+        .pop-search { padding: var(--s-1) var(--s-1) 4px; }
+        .pop-search input, .pop-cmd input {
+            width: 100%; height: 30px; box-sizing: border-box; padding: 0 var(--s-2); font-family: inherit; font-size: var(--fz-xs);
+            background: var(--input); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius);
+        }
+        .pop-search input:focus, .pop-cmd input:focus { outline: none; border-color: var(--accent); }
+        .pop-cmd { display: flex; align-items: center; gap: var(--s-2); padding: 2px var(--s-2) 4px; color: var(--text-muted); font-size: var(--fz-xs); }
+        .pop-cmd label { white-space: nowrap; }
+        .pop-cmd input { flex: 1; min-width: 0; height: 26px; }
+        .rdot { width: 8px; height: 8px; border-radius: 50%; flex: none; box-sizing: border-box; }
+        .rdot.on { background: var(--status-active); }
+        /* Black, as asked, with a ring so it shows on a dark theme too. */
+        .rdot.off { background: #000; border: 1px solid var(--text-muted); }
+        #pop-list .pop-item .nm { flex: none; max-width: 55%; }
+        #add-pop .pop-item .meta { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+        .pop-item .rel { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
+        .pop-item.hit { background: var(--input); }
+        .mini-spin { width: 12px; height: 12px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite; }
+    </style>
+    <script>(function(){var c=localStorage.getItem('rustguac_theme_colors');if(c){try{var o=JSON.parse(c),r=document.documentElement.style;for(var k in o)r.setProperty('--'+k.replace(/_/g,'-'),o[k]);}catch(e){}}})();</script>
+</head>
+<body class="layout-tabs">
+    <div id="bar">
+        <button class="bar-btn" id="btn-back" type="button" title="Back to Connections">&#8592;</button>
+        <div id="who"><span class="tmux-badge">TMUX</span><span id="who-name"></span><span id="who-host"></span></div>
+        <div id="tabs" role="tablist" aria-label="tmux sessions"></div>
+        <div id="tools">
+            <button class="bar-btn" id="btn-add" type="button" title="Open a tmux session" aria-haspopup="dialog" aria-expanded="false">+ Session</button>
+            <button class="bar-btn" id="btn-layout-tabs" type="button" aria-pressed="true" title="One session at a time">Tabs</button>
+            <button class="bar-btn" id="btn-layout-split" type="button" aria-pressed="false" title="Every session side by side">Split</button>
+            <button class="bar-btn" id="btn-fs" type="button" title="Fullscreen">&#x26F6;</button>
+        </div>
+    </div>
+    <div id="panes"><div id="empty"><div><p>No tmux sessions open.</p><p><button class="bar-btn" id="btn-empty-add" type="button">+ Open a session</button></p></div></div></div>
+    <div id="add-pop" role="dialog" aria-label="Open a tmux session" hidden>
+        <div class="pop-search"><input id="pop-q" type="search" placeholder="Search sessions and repos" aria-label="Search sessions and repos" spellcheck="false" autocomplete="off"></div>
+        <div class="pop-head"><span class="grow" id="pop-who">Sessions</span><span id="pop-spin" class="mini-spin" hidden></span><button class="bar-btn" id="pop-refresh" type="button" title="Refresh">&#x21bb;</button></div>
+        <div id="pop-list"></div>
+        <div class="pop-head" id="repo-head" hidden><span class="grow" id="repo-title">Repos in ~/GitLab</span></div>
+        <div class="pop-cmd" id="repo-cmd" hidden><label for="repo-cmd-in">Run in a new repo session</label><input id="repo-cmd-in" type="text" maxlength="200" placeholder="e.g. claude -n {repo}" spellcheck="false" autocomplete="off" title="Typed into a session started from a repo below. {repo} is the repo folder's name, {session} the tmux session's, {path} the folder, {rel} the folder under the repos root. Empty: nothing is run."><button class="bar-btn" id="repo-cmd-reset" type="button" title="Back to this console's default command" hidden>Default</button></div>
+        <div id="repo-list"></div>
+        <form class="pop-new" id="pop-form" autocomplete="off">
+            <input id="pop-name" type="text" maxlength="64" placeholder="new or existing session name" aria-label="tmux session name" spellcheck="false">
+            <button type="submit">Open</button>
+        </form>
+    </div>
+    <script src="/ui.js"></script>
+    <script src="/tmux-cmd.js"></script>
+    <script>
+    (function () {
+        'use strict';
+        var q = new URLSearchParams(location.search);
+        var scope = q.get('scope') || '', folder = q.get('folder') || '', entry = q.get('entry') || '';
+        var protocol = q.get('protocol') || '';
+        var label = q.get('label') || entry;
+        var host = q.get('host') || '';
+        if (!scope || !folder || !entry) { location.replace('/connections.html'); return; }
+        // Matches crate::tmux::valid_name.
+        var NAME_RE = /^[A-Za-z0-9_\-@+=,~]{1,64}$/;
+        var BACKOFF = [1, 2, 4, 8, 15, 30];
+        // Without 'ready' from a frame within this, its connection is lost.
+        // Only a backstop: a tunnel that fails says so itself. Generous, as
+        // a link that has just come back (a laptop waking) can take half a
+        // minute to load and attach a frame, and giving up on an attempt
+        // that is about to work only starts another.
+        var READY_TIMEOUT_MS = 60000;
+        // At most this many tabs connect at once, the active one first, so
+        // every tab reconnecting together (the network came back) neither
+        // crowds a slow link nor runs into the per-user session limit.
+        var MAX_CONNECTING = 3;
+        var connectingCount = 0, waiting = [];
+        var entryUrl = '/api/addressbook/folders/' + encodeURIComponent(scope) + '/' + encodeURIComponent(folder) + '/entries/' + encodeURIComponent(entry);
+        var protoQuery = protocol ? '?protocol=' + encodeURIComponent(protocol) : '';
+        // Open tabs of this connection, remembered for a reload of the page.
+        var storeKey = 'rg-tmux:' + scope + '/' + folder + '/' + entry + '/' + protocol;
+
+        function headers(extra) {
+            var h = extra || {};
+            try { var k = sessionStorage.getItem('rustguac_api_key'); if (k) h['Authorization'] = 'Bearer ' + k; } catch (e) {}
+            return h;
+        }
+        // Signed out (expired, or logged out in another tab): sign in, then
+        // come back to this workspace with the same tabs.
+        function signIn() { location.href = '/auth/login?next=' + encodeURIComponent(location.pathname + location.search); }
+        function el(tag, cls, text) { var e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
+        function ago(sec) {
+            if (!sec) return '';
+            var d = Math.max(0, Math.round(Date.now() / 1000 - sec));
+            if (d < 60) return 'now';
+            if (d < 3600) return Math.floor(d / 60) + 'm ago';
+            if (d < 86400) return Math.floor(d / 3600) + 'h ago';
+            return Math.floor(d / 86400) + 'd ago';
+        }
+
+        document.getElementById('who-name').textContent = label;
+        document.getElementById('who-host').textContent = host;
+        document.getElementById('btn-back').addEventListener('click', function () { location.href = '/connections.html'; });
+
+        var tabsEl = document.getElementById('tabs'), panesEl = document.getElementById('panes');
+        var tabs = [];          // { name, state, tabEl, paneEl, frame, cover, attempt, timer, readyTimer, ended }
+        var active = null;
+        var layout = 'tabs';
+        try { if (localStorage.getItem('rg-tmux-layout') === 'split') layout = 'split'; } catch (e) {}
+
+        function find(name) { for (var i = 0; i < tabs.length; i++) if (tabs[i].name === name) return tabs[i]; return null; }
+        function remember() {
+            try { sessionStorage.setItem(storeKey, JSON.stringify({ tabs: tabs.map(function (t) { return t.name; }), active: active && active.name })); } catch (e) {}
+            var u = new URL(location.href);
+            u.searchParams.set('s', tabs.map(function (t) { return t.name; }).join(','));
+            if (active) u.searchParams.set('active', active.name); else u.searchParams.delete('active');
+            try { history.replaceState(null, '', u.toString()); } catch (e) {}
+            document.title = label + ' — tmux' + (tabs.length ? ' (' + tabs.length + ')' : '');
+            document.getElementById('empty').classList.toggle('on', tabs.length === 0);
+        }
+
+        // ── Layout ──
+        function applyLayout() {
+            document.body.className = 'layout-' + layout;
+            document.getElementById('btn-layout-tabs').setAttribute('aria-pressed', String(layout === 'tabs'));
+            document.getElementById('btn-layout-split').setAttribute('aria-pressed', String(layout === 'split'));
+            if (layout === 'split') {
+                var n = Math.max(1, tabs.length);
+                var cols = Math.ceil(Math.sqrt(n));
+                // Wide screens: favour columns, terminals are wider than tall.
+                if (panesEl.clientWidth > panesEl.clientHeight * 1.6 && cols * (cols - 1) >= n) cols = Math.min(n, cols + 1);
+                var rows = Math.ceil(n / cols);
+                panesEl.style.gridTemplateColumns = 'repeat(' + cols + ', minmax(0, 1fr))';
+                panesEl.style.gridTemplateRows = 'repeat(' + rows + ', minmax(0, 1fr))';
+            } else {
+                panesEl.style.gridTemplateColumns = panesEl.style.gridTemplateRows = '';
+            }
+            try { localStorage.setItem('rg-tmux-layout', layout); } catch (e) {}
+        }
+        document.getElementById('btn-layout-tabs').addEventListener('click', function () { layout = 'tabs'; applyLayout(); focusActive(); });
+        document.getElementById('btn-layout-split').addEventListener('click', function () { layout = 'split'; applyLayout(); focusActive(); });
+        window.addEventListener('resize', function () { if (layout === 'split') applyLayout(); });
+        document.getElementById('btn-fs').addEventListener('click', function () {
+            var d = document;
+            if (d.fullscreenElement) { d.exitFullscreen(); return; }
+            var r = d.documentElement.requestFullscreen; if (r) r.call(d.documentElement).catch(function () {});
+        });
+
+        // ── Tabs ──
+        function setState(t, state) {
+            t.state = state;
+            t.tabEl.className = 'tab s-' + state + (t === active ? ' active' : '');
+            var titles = { live: 'attached', connecting: 'attaching…', reconnecting: 'reconnecting…', detached: 'detached', error: 'error' };
+            t.tabEl.title = t.name + ' — ' + (titles[state] || state);
+        }
+        function activate(t, focus) {
+            if (!t) return;
+            active = t;
+            tabs.forEach(function (x) {
+                x.tabEl.classList.toggle('active', x === t);
+                x.tabEl.setAttribute('aria-selected', String(x === t));
+                x.paneEl.classList.toggle('active', x === t);
+            });
+            remember();
+            if (focus !== false) focusActive();
+        }
+        function focusActive() {
+            if (!active || !active.frame) return;
+            try { active.frame.focus(); active.frame.contentWindow.focus(); } catch (e) {}
+            // The session's keyboard listens on its display, which lost the
+            // focus when its pane was hidden; focusing the frame's window
+            // does not give it back, so ask the frame to.
+            try { active.frame.contentWindow.postMessage({ rgLauncher: 'focus' }, location.origin); } catch (e) {}
+        }
+        function numberTabs() {
+            tabs.forEach(function (t, i) { t.numEl.textContent = i < 9 ? String(i + 1) : ''; });
+        }
+
+        function openTab(name, focus) {
+            var t = find(name);
+            if (t) { activate(t, focus); if (t.state === 'detached' || t.state === 'error') connect(t); return t; }
+            t = { name: name, attempt: 0 };
+            var tab = el('div', 'tab');
+            tab.setAttribute('role', 'tab');
+            tab.tabIndex = 0;
+            t.numEl = el('span', 'tab-num');
+            tab.appendChild(el('span', 'dot'));
+            tab.appendChild(el('span', 'tab-name', name));
+            tab.appendChild(t.numEl);
+            var x = el('button', 'tab-x', '×');
+            x.type = 'button';
+            x.title = 'Close the tab (the tmux session keeps running on the host)';
+            x.setAttribute('aria-label', 'Close ' + name);
+            tab.appendChild(x);
+            tab.addEventListener('click', function (e) { if (e.target === x) { closeTab(t); return; } activate(t); });
+            tab.addEventListener('auxclick', function (e) { if (e.button === 1) { e.preventDefault(); closeTab(t); } });
+            tab.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); activate(t); } });
+            t.tabEl = tab;
+            var pane = el('div', 'pane');
+            pane.appendChild(el('div', 'pane-label', name));
+            var cover = el('div', 'pane-cover');
+            pane.appendChild(cover);
+            t.paneEl = pane; t.cover = cover;
+            tabsEl.appendChild(tab);
+            panesEl.appendChild(pane);
+            tabs.push(t);
+            numberTabs();
+            applyLayout();
+            activate(t, focus);
+            connect(t);
+            return t;
+        }
+
+        function closeTab(t) {
+            clearTimeout(t.timer); clearTimeout(t.readyTimer); clearInterval(t.tick);
+            t.gen = (t.gen || 0) + 1;
+            freeSlot(t);
+            // Unloading the frame closes its connection, which only detaches
+            // from tmux: the session carries on on the host.
+            dropFrame(t);
+            t.tabEl.remove(); t.paneEl.remove();
+            var i = tabs.indexOf(t);
+            tabs.splice(i, 1);
+            if (active === t) active = tabs[Math.min(i, tabs.length - 1)] || null;
+            numberTabs();
+            applyLayout();
+            if (active) activate(active); else remember();
+        }
+
+        // ── Covers ──
+        function cover(t, html) {
+            if (html == null) { t.cover.classList.remove('on'); t.cover.innerHTML = ''; return; }
+            t.cover.innerHTML = html;
+            t.cover.classList.add('on');
+            var b = t.cover.querySelectorAll('button[data-act]');
+            for (var i = 0; i < b.length; i++) b[i].addEventListener('click', function () {
+                var act = this.getAttribute('data-act');
+                if (act === 'retry') { t.attempt = 0; t.quickEnds = 0; connect(t); }
+                else if (act === 'close') closeTab(t);
+            });
+        }
+        function esc(s) { var d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
+        // ── Connecting a tab ──
+        // End the rustguac session behind a tab's frame (t.sid). Every
+        // attempt creates a session, and one that never attached, or whose
+        // connection died with the network, would otherwise count against
+        // the user's session limit until it times out. Ending it only
+        // detaches from tmux: the tmux session carries on. Never waits more
+        // than a few seconds (the network may still be down).
+        function endSession(t) {
+            var id = t.sid;
+            t.sid = null;
+            if (!id) return Promise.resolve();
+            var done = fetch('/api/sessions/' + encodeURIComponent(id), { method: 'DELETE', headers: headers(), credentials: 'same-origin', keepalive: true })
+                .catch(function () {});
+            return Promise.race([done, new Promise(function (r) { setTimeout(r, 3000); })]);
+        }
+        function dropFrame(t) {
+            if (t.frame) {
+                try { t.frame.src = 'about:blank'; } catch (e) {}
+                t.frame.remove();
+                t.frame = null;
+            }
+            return endSession(t);
+        }
+        // A tab's attempt is over (live, lost, failed, ended or closed):
+        // let the next waiting tab connect.
+        function freeSlot(t) {
+            var w = waiting.indexOf(t);
+            if (w >= 0) waiting.splice(w, 1);
+            if (!t.slot) return;
+            t.slot = false;
+            connectingCount--;
+            while (connectingCount < MAX_CONNECTING && waiting.length) {
+                var n = waiting.shift();
+                if (find(n.name) === n && (n.state === 'connecting' || n.state === 'reconnecting')) begin(n, Promise.resolve());
+            }
+        }
+        // Each attempt gets a new frame, so a message from the frame of an
+        // earlier attempt can never be mistaken for one from this attempt;
+        // the previous attempt's session is ended first.
+        function connect(t) {
+            clearTimeout(t.timer); clearTimeout(t.readyTimer); clearInterval(t.tick);
+            t.ended = false;
+            t.backingOff = false;
+            var previous = dropFrame(t);
+            freeSlot(t);
+            setState(t, t.attempt ? 'reconnecting' : 'connecting');
+            if (connectingCount >= MAX_CONNECTING) {
+                if (t === active) waiting.unshift(t); else waiting.push(t);
+                cover(t, '<div><div class="spinner"></div><h3>Waiting to ' + (t.attempt ? 'reconnect to ' : 'attach to ') + esc(t.name) + '…</h3><p>A few tabs connect at a time.</p></div>');
+                return;
+            }
+            begin(t, previous);
+        }
+        function begin(t, previous) {
+            t.slot = true;
+            connectingCount++;
+            var gen = t.gen = (t.gen || 0) + 1;
+            cover(t, '<div><div class="spinner"></div><h3>' + (t.attempt ? 'Reconnecting to ' : 'Attaching to ') + esc(t.name) + '…</h3></div>');
+            var w = t.paneEl.clientWidth || panesEl.clientWidth, h = t.paneEl.clientHeight || panesEl.clientHeight;
+            var body = { tmux_session: t.name, width: w, height: h, dpi: Math.round((window.devicePixelRatio || 1) * 96) };
+            if (protocol) body.protocol = protocol;
+            try { var kb = localStorage.getItem('rustguac_keyboard_layout'); if (kb) body.keyboard_layout = kb; } catch (e) {}
+            previous
+                .then(function () {
+                    if (t.gen !== gen || find(t.name) !== t) return null;
+                    return fetch(entryUrl + '/connect', { method: 'POST', headers: headers({ 'Content-Type': 'application/json' }), credentials: 'same-origin', body: JSON.stringify(body) });
+                })
+                .then(function (res) {
+                    if (!res) return null;
+                    if (res.ok) return res.json();
+                    if (res.status === 401) { signIn(); return new Promise(function () {}); }
+                    return res.json().catch(function () { return {}; }).then(function (j) {
+                        var err = new Error(j.error || ('HTTP ' + res.status));
+                        // The server or a proxy in front of it, or the
+                        // session limit (sessions of earlier attempts are
+                        // still ending): worth waiting out.
+                        err.retry = res.status >= 500 || res.status === 429 || /maximum (concurrent )?sessions/i.test(j.error || '');
+                        throw err;
+                    });
+                })
+                .then(function (data) {
+                    if (!data) return;
+                    // The tab moved on (closed, or another attempt) while
+                    // this one was being made: end what it made.
+                    if (t.gen !== gen || find(t.name) !== t) { endSession({ sid: data.session_id }); return; }
+                    t.sid = data.session_id;
+                    var f = document.createElement('iframe');
+                    f.title = 'tmux ' + t.name;
+                    f.setAttribute('allow', 'fullscreen; clipboard-read; clipboard-write');
+                    f.src = data.client_url + '?name=' + encodeURIComponent(label + ' · ' + t.name) + '&embedded=1';
+                    t.frame = f;
+                    t.paneEl.insertBefore(f, t.paneEl.firstChild);
+                    t.readyTimer = setTimeout(function () { lost(t, { message: 'no answer from the session' }); }, READY_TIMEOUT_MS);
+                })
+                .catch(function (err) {
+                    if (t.gen !== gen) return;
+                    if (err.retry === false) { failed(t, err.message); return; }
+                    lost(t, err);
+                });
+        }
+        function ready(t) {
+            clearTimeout(t.readyTimer);
+            freeSlot(t);
+            t.attempt = 0;
+            t.liveAt = Date.now();
+            setState(t, 'live');
+            cover(t, null);
+            try { t.frame.contentWindow.postMessage({ rgLauncher: 'viewport', fullscreen: false }, location.origin); } catch (e) {}
+            // Only the active tab gets the keyboard, and not while the
+            // person is typing in the + popover. A background tab that took
+            // the focus as it connected gives it back.
+            if (t === active) { if (pop.hidden) focusActive(); }
+            else if (document.activeElement === t.frame && layout !== 'split') focusActive();
+        }
+        // Retryable: wait (longer each time it keeps failing) and connect
+        // again; at once if the browser comes back online first.
+        function lost(t, why) {
+            if (t.ended || !find(t.name)) return;
+            clearTimeout(t.timer); clearTimeout(t.readyTimer);
+            freeSlot(t);
+            var wait = BACKOFF[Math.min(t.attempt, BACKOFF.length - 1)];
+            t.attempt++;
+            setState(t, 'reconnecting');
+            var offline = navigator.onLine === false;
+            var left = wait;
+            function paint() {
+                cover(t, '<div><div class="spinner"></div><h3>Connection to ' + esc(t.name) + ' lost</h3>'
+                    + '<p>' + (offline ? 'Offline. ' : '') + 'Reconnecting in ' + left + 's. The session keeps running on the host.'
+                    + (why && why.message ? '<br><span class="err">' + esc(why.message) + '</span>' : '') + '</p>'
+                    + '<div class="btns"><button class="primary" data-act="retry">Reconnect now</button><button data-act="close">Close tab</button></div></div>');
+            }
+            paint();
+            var tick = setInterval(function () { left--; if (left <= 0 || t.state !== 'reconnecting') { clearInterval(tick); return; } paint(); }, 1000);
+            t.backingOff = true;
+            t.timer = setTimeout(function () { clearInterval(tick); connect(t); }, wait * 1000);
+            t.tick = tick;
+        }
+        // Not retryable (refused, no such entry, a bad name): say why.
+        function failed(t, msg) {
+            clearTimeout(t.timer); clearTimeout(t.readyTimer);
+            dropFrame(t);
+            freeSlot(t);
+            setState(t, 'error');
+            cover(t, '<div><h3 class="err">Could not open ' + esc(t.name) + '</h3><p>' + esc(msg) + '</p>'
+                + '<div class="btns"><button class="primary" data-act="retry">Try again</button><button data-act="close">Close tab</button></div></div>');
+        }
+        // Ended cleanly. Either the tmux session is gone (its shell exited,
+        // or it was killed), or only this connection ended (rustguac's
+        // session time limit, an admin, a tmux detach). Ask the host which:
+        // still there, reattach on its own, as for a lost connection; gone,
+        // say so and leave starting it again to the user. A session that
+        // keeps ending right after attaching is left to the user too.
+        var QUICK_END_MS = 15000;
+        function detached(t) {
+            clearTimeout(t.timer); clearTimeout(t.readyTimer);
+            t.ended = true;
+            dropFrame(t);
+            freeSlot(t);
+            var quick = t.liveAt && Date.now() - t.liveAt < QUICK_END_MS;
+            t.quickEnds = quick ? (t.quickEnds || 0) + 1 : 0;
+            if (t.quickEnds >= 2) { showDetached(t, null); return; }
+            setState(t, 'reconnecting');
+            cover(t, '<div><div class="spinner"></div><h3>' + esc(t.name) + ' ended</h3><p>Checking whether the tmux session is still running on the host\u2026</p></div>');
+            fetch(entryUrl + '/tmux' + protoQuery, { headers: headers(), credentials: 'same-origin' })
+                .then(function (res) { return res.ok ? res.json() : null; })
+                .then(function (l) {
+                    if (!find(t.name) || t.state !== 'reconnecting') return;
+                    if (!l || !l.installed) { showDetached(t, null); return; }
+                    var alive = (l.sessions || []).some(function (s) { return s.name === t.name; });
+                    if (alive) { t.attempt = 1; connect(t); } else showDetached(t, false);
+                })
+                .catch(function () { if (find(t.name) && t.state === 'reconnecting') showDetached(t, null); });
+        }
+        // alive: false when the host says the session is gone, null when
+        // unknown.
+        function showDetached(t, alive) {
+            setState(t, 'detached');
+            if (alive === false) {
+                cover(t, '<div><h3>' + esc(t.name) + ' has ended</h3><p>The tmux session is no longer running on the host: its shell exited or it was ended.</p>'
+                    + '<div class="btns"><button class="primary" data-act="retry">Start it again</button><button data-act="close">Close tab</button></div></div>');
+                return;
+            }
+            cover(t, '<div><h3>Detached from ' + esc(t.name) + '</h3><p>The tmux session exited or was detached. Reattach to pick it up again, or start it afresh if it has ended.</p>'
+                + '<div class="btns"><button class="primary" data-act="retry">Reattach</button><button data-act="close">Close tab</button></div></div>');
+        }
+        // Leaving the page: end every tab's session now rather than leave
+        // the ones still connecting to time out.
+        window.addEventListener('pagehide', function () { tabs.forEach(function (t) { endSession(t); }); });
+        window.addEventListener('online', function () {
+            tabs.forEach(function (t) { if (t.backingOff) { clearInterval(t.tick); connect(t); } });
+        });
+
+        // Messages from the session frames (client.html embedded mode).
+        window.addEventListener('message', function (e) {
+            if (e.origin !== location.origin || !e.data) return;
+            if (e.data.rgTmux === 'open' && typeof e.data.name === 'string' && NAME_RE.test(e.data.name)) { openTab(e.data.name); try { window.focus(); } catch (x) {} return; }
+            var t = null;
+            for (var i = 0; i < tabs.length; i++) if (tabs[i].frame && tabs[i].frame.contentWindow === e.source) { t = tabs[i]; break; }
+            if (!t) return;
+            if (e.data.rgSession === 'ready') ready(t);
+            else if (e.data.rgSession === 'end') detached(t);
+            else if (e.data.rgSession === 'lost') {
+                var c = e.data.code;
+                // Refused, unauthorized, forbidden: retrying only repeats it.
+                if (c >= 0x0300 && c < 0x0400) failed(t, e.data.message || 'The host refused the connection.');
+                else lost(t, { message: e.data.message });
+            }
+        });
+        // A click inside a frame makes it the active pane (split layout).
+        // With one tab showing, a frame that is not the active one cannot
+        // be clicked: if it has the focus it took it, and the active tab
+        // gets it back.
+        window.addEventListener('blur', function () {
+            setTimeout(function () {
+                var a = document.activeElement;
+                for (var i = 0; i < tabs.length; i++) if (tabs[i].frame === a && tabs[i] !== active) {
+                    if (layout === 'split') activate(tabs[i], false); else focusActive();
+                    break;
+                }
+            }, 0);
+        });
+        // Alt+1..9 switches tabs while the bar has focus (a frame keeps its
+        // keys for the session).
+        document.addEventListener('keydown', function (e) {
+            if (e.altKey && !e.ctrlKey && !e.metaKey && /^[1-9]$/.test(e.key)) {
+                var t = tabs[parseInt(e.key, 10) - 1];
+                if (t) { e.preventDefault(); activate(t); }
+            } else if (e.key === 'Escape') closePop();
+        });
+
+        // ── The host's sessions ──
+        var pop = document.getElementById('add-pop'), addBtn = document.getElementById('btn-add');
+        function openPop(anchor) {
+            pop.hidden = false;
+            addBtn.setAttribute('aria-expanded', 'true');
+            var r = (anchor || addBtn).getBoundingClientRect();
+            pop.style.top = (r.bottom + 4) + 'px';
+            pop.style.left = Math.max(8, Math.min(r.right - pop.offsetWidth, window.innerWidth - pop.offsetWidth - 8)) + 'px';
+            document.getElementById('pop-name').value = '';
+            document.getElementById('pop-q').value = '';
+            document.getElementById('pop-q').focus();
+            loadList();
+        }
+        function closePop() { if (pop.hidden) return; pop.hidden = true; addBtn.setAttribute('aria-expanded', 'false'); }
+        addBtn.addEventListener('click', function () { if (pop.hidden) openPop(); else closePop(); });
+        document.getElementById('btn-empty-add').addEventListener('click', function () { openPop(addBtn); });
+        document.addEventListener('mousedown', function (e) { if (!pop.hidden && !pop.contains(e.target) && e.target !== addBtn) closePop(); });
+        document.getElementById('pop-refresh').addEventListener('click', loadList);
+        document.getElementById('pop-form').addEventListener('submit', function (e) {
+            e.preventDefault();
+            var inp = document.getElementById('pop-name');
+            var name = inp.value.trim();
+            if (!NAME_RE.test(name)) { listMsg('Use 1 to 64 letters, digits or _ - @ + = , ~', true); inp.focus(); return; }
+            closePop();
+            openTab(name);
+        });
+        function listMsg(text, isErr) {
+            var box = document.getElementById('pop-list');
+            box.innerHTML = '';
+            box.appendChild(el('div', 'pop-msg' + (isErr ? ' err' : ''), text));
+        }
+        var listSeq = 0, listing = null;
+        // The startup command for sessions started in a repo: the
+        // console's default until the person types their own, which this
+        // browser then remembers (tmux-cmd.js).
+        var cmdIn = document.getElementById('repo-cmd-in'), cmdReset = document.getElementById('repo-cmd-reset');
+        var defaultCmd = '';
+        function showCmd() {
+            if (document.activeElement !== cmdIn) cmdIn.value = rgRepoCommand.template(defaultCmd);
+            cmdReset.hidden = !defaultCmd || rgRepoCommand.own() == null || rgRepoCommand.own() === defaultCmd;
+        }
+        showCmd();
+        cmdIn.addEventListener('change', function () { rgRepoCommand.set(cmdIn.value); showCmd(); });
+        cmdReset.addEventListener('click', function () { rgRepoCommand.clear(); showCmd(); });
+        document.getElementById('pop-q').addEventListener('input', render);
+        document.getElementById('pop-q').addEventListener('keydown', function (e) {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                var hit = pop.querySelector('.pop-item.hit') || pop.querySelector('#pop-list .pop-item:not([disabled]), #repo-list .pop-item:not([disabled])');
+                if (hit) hit.click();
+            } else if (e.key === 'ArrowDown') {
+                e.preventDefault();
+                var first = pop.querySelector('#pop-list .pop-item:not([disabled]), #repo-list .pop-item:not([disabled])');
+                if (first) first.focus();
+            }
+        });
+        // One login on the host gives both the sessions and the repos.
+        function loadList() {
+            var seq = ++listSeq;
+            var spin = document.getElementById('pop-spin');
+            spin.hidden = false;
+            if (!listing) listMsg('Asking the host…');
+            fetch(entryUrl + '/tmux/repos' + protoQuery, { headers: headers(), credentials: 'same-origin' })
+                .then(function (res) {
+                    if (res.status === 401) { signIn(); return new Promise(function () {}); }
+                    return res.json().catch(function () { return {}; }).then(function (j) { return { ok: res.ok, j: j }; });
+                })
+                .then(function (r) {
+                    if (seq !== listSeq) return;
+                    spin.hidden = true;
+                    if (!r.ok) { listing = null; render(); listMsg(r.j.error || 'The host could not be asked.', true); return; }
+                    listing = r.j;
+                    defaultCmd = listing.default_command || '';
+                    showCmd();
+                    render();
+                })
+                .catch(function () { if (seq !== listSeq) return; spin.hidden = true; listing = null; render(); listMsg('The host could not be reached.', true); });
+        }
+        function matches(qs, text) {
+            text = text.toLowerCase();
+            for (var i = 0; i < qs.length; i++) if (text.indexOf(qs[i]) < 0) return false;
+            return true;
+        }
+        function render() {
+            var box = document.getElementById('pop-list'), rbox = document.getElementById('repo-list');
+            var rhead = document.getElementById('repo-head'), rcmd = document.getElementById('repo-cmd');
+            rbox.innerHTML = '';
+            rhead.hidden = rcmd.hidden = true;
+            if (!listing) return;
+            var qs = document.getElementById('pop-q').value.trim().toLowerCase().split(/\s+/).filter(Boolean);
+            // Only the login's own sessions are listed: say whose.
+            document.getElementById('pop-who').textContent = listing.login ? 'Sessions, as ' + listing.login : 'Sessions';
+            box.innerHTML = '';
+            var sessions = listing.sessions || [];
+            var repoOf = {};
+            (listing.repos || []).forEach(function (rp) { rp.sessions.forEach(function (n) { if (!repoOf[n]) repoOf[n] = rp.rel; }); });
+            if (!listing.installed) box.appendChild(el('div', 'pop-msg err', 'tmux is not installed on this host.'));
+            else if (!sessions.length) box.appendChild(el('div', 'pop-msg', 'No tmux sessions running. Pick a repo, or name one below.'));
+            else {
+                var shown = sessions.filter(function (s) { return matches(qs, s.name + ' ' + (repoOf[s.name] || '') + ' ' + (s.path || '')); });
+                var closed = shown.filter(function (s) { return s.attachable && !find(s.name); });
+                if (closed.length > 1 && !qs.length) {
+                    var all = el('button', 'pop-item');
+                    all.type = 'button';
+                    all.appendChild(el('span', 'nm', 'Open all ' + closed.length));
+                    all.addEventListener('click', function () { closePop(); closed.forEach(function (s, i) { openTab(s.name, i === closed.length - 1); }); });
+                    box.appendChild(all);
+                }
+                if (!shown.length) box.appendChild(el('div', 'pop-msg', 'No session matches.'));
+                shown.forEach(function (s) {
+                    var b = el('button', 'pop-item');
+                    b.type = 'button';
+                    b.appendChild(el('span', 'tmux-badge', 'TMUX'));
+                    b.appendChild(el('span', 'nm', s.name));
+                    var meta = [];
+                    if (repoOf[s.name]) meta.push(repoOf[s.name]);
+                    if (find(s.name)) meta.push('open');
+                    else if (s.attached) meta.push(s.attached + ' attached');
+                    meta.push(s.windows + (s.windows === 1 ? ' window' : ' windows'));
+                    if (s.activity) meta.push(ago(s.activity));
+                    b.appendChild(el('span', 'meta', meta.join(' · ')));
+                    if (s.path) b.title = s.path;
+                    if (!s.attachable) { b.disabled = true; b.title = 'This name has characters rustguac does not pass to a shell.'; }
+                    else b.addEventListener('click', function () { closePop(); openTab(s.name); });
+                    box.appendChild(b);
+                });
+            }
+            // ── Repos in ~/GitLab: green = a session runs in it, black = none.
+            var repos = listing.repos || [];
+            rhead.hidden = false;
+            document.getElementById('repo-title').textContent = 'Repos in ' + (listing.root ? listing.root.replace(/^\/(root|home\/[^/]+)/, '~') : '~/GitLab') + ' (' + repos.length + ')';
+            if (!repos.length) { rbox.appendChild(el('div', 'pop-msg', listing.root ? 'No git.example.com repos there.' : 'This host did not list any repos.')); return; }
+            if (listing.installed) rcmd.hidden = false;
+            var shownRepos = repos.filter(function (rp) { return matches(qs, rp.rel + ' ' + rp.sessions.join(' ')); });
+            if (!shownRepos.length) { rbox.appendChild(el('div', 'pop-msg', 'No repo matches.')); return; }
+            shownRepos.forEach(function (rp) {
+                var on = rp.sessions.length > 0;
+                var b = el('button', 'pop-item');
+                b.type = 'button';
+                var d = el('span', 'rdot ' + (on ? 'on' : 'off'));
+                d.title = on ? 'A tmux session runs in this folder' : 'No tmux session in this folder';
+                b.appendChild(d);
+                var rel = el('span', 'rel');
+                rel.appendChild(document.createTextNode('‎' + rp.rel));
+                b.appendChild(rel);
+                b.appendChild(el('span', 'meta', on ? rp.sessions.join(', ') : 'start ' + rp.name));
+                b.title = rp.path;
+                if (!listing.installed) b.disabled = true;
+                else b.addEventListener('click', function () { if (on) { closePop(); openTab(rp.sessions[0]); } else startRepo(rp, b); });
+                rbox.appendChild(b);
+            });
+        }
+        // A session name for a repo that no running session already has: a
+        // running one of that name is in another folder.
+        function freeName(base) {
+            var taken = {};
+            ((listing && listing.sessions) || []).forEach(function (s) { taken[s.name] = 1; });
+            if (!taken[base]) return base;
+            for (var i = 2; i < 100; i++) {
+                var n = base.slice(0, 64 - String(i).length - 1) + '-' + i;
+                if (!taken[n]) return n;
+            }
+            return base;
+        }
+        function startRepo(rp, btn) {
+            var name = freeName(rp.name);
+            // What is in the box is what runs; typed but not yet left, it
+            // is theirs from now on.
+            var tpl = cmdIn.value.trim();
+            if (tpl !== rgRepoCommand.template(defaultCmd)) { rgRepoCommand.set(tpl); showCmd(); }
+            var cmd = rgRepoCommand.expand(tpl, rp, name);
+            btn.disabled = true;
+            btn.querySelector('.meta').textContent = 'starting…';
+            fetch(entryUrl + '/tmux/start' + protoQuery, {
+                method: 'POST', credentials: 'same-origin',
+                headers: headers({ 'Content-Type': 'application/json' }),
+                body: JSON.stringify({ sessions: [{ name: name, dir: rp.path, commands: cmd }] })
+            })
+                .then(function (res) {
+                    if (res.status === 401) { signIn(); return new Promise(function () {}); }
+                    return res.json().catch(function () { return {}; }).then(function (j) { return { ok: res.ok, j: j }; });
+                })
+                .then(function (r) {
+                    var st = r.ok && r.j.sessions && r.j.sessions[0];
+                    if (st && (st.state === 'created' || st.state === 'running')) { closePop(); openTab(name); loadList(); return; }
+                    btn.disabled = false;
+                    var why = !r.ok ? (r.j.error || 'could not start') : !st ? 'could not start' : st.state === 'no_dir' ? 'the folder is gone' : 'could not start';
+                    btn.querySelector('.meta').textContent = why;
+                })
+                .catch(function () { btn.disabled = false; btn.querySelector('.meta').textContent = 'the host could not be reached'; });
+        }
+
+        // ── Start ──
+        var start = (q.get('s') || '').split(',').filter(function (n) { return NAME_RE.test(n); });
+        var first = q.get('active');
+        if (!start.length) {
+            try { var saved = JSON.parse(sessionStorage.getItem(storeKey) || 'null'); if (saved) { start = saved.tabs || []; first = first || saved.active; } } catch (e) {}
+        }
+        applyLayout();
+        start.forEach(function (n, i) { if (NAME_RE.test(n)) openTab(n, false); });
+        var f = first && find(first);
+        if (f) activate(f); else if (tabs.length) activate(tabs[tabs.length - 1]);
+        remember();
+        if (!tabs.length) openPop(addBtn);
+    })();
+    </script>
+</body>
+</html>

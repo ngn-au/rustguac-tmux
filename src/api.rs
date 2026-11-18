@@ -2475,6 +2475,14 @@ impl VaultBackends {
         self.scoped(scope).await?.delete_folder(scope, folder).await
     }
 
+    /// The top-level folders of one scope.
+    pub async fn list_folders_in_scope(
+        &self,
+        scope: &str,
+    ) -> Result<Vec<crate::vault::FolderInfo>, VaultError> {
+        self.scoped(scope).await?.list_folders_in_scope(scope).await
+    }
+
     pub async fn resolve_folder_access(
         &self,
         scope: &str,
@@ -3819,6 +3827,10 @@ pub struct ConnectRequest {
     /// Default: the primary.
     #[serde(default)]
     pub protocol: Option<String>,
+    /// SSH with `tmux` on: attach to this tmux session on the host,
+    /// creating it if it does not exist (#325). Empty means none.
+    #[serde(default)]
+    pub tmux_session: Option<String>,
 }
 
 /// POST /api/ssh/probe-host-key — Probe an SSH server to retrieve its host key.
@@ -4055,6 +4067,7 @@ pub fn session_request_from_entry(
         address_book_entry,
         address_book_folder,
         address_book_protocol: None,
+        tmux_session: None,
         entry_display_name,
         max_recordings: entry.max_recordings,
         login_script: entry.login_script,
@@ -4117,6 +4130,10 @@ fn entry_connect_request(
     ab_entry.password = req.password.or(ab_entry.password);
     ab_entry.domain = req.domain.or(ab_entry.domain);
     ab_entry.banner = req.banner.or(ab_entry.banner);
+    let tmux_session = req.tmux_session.filter(|n| !n.is_empty());
+    if tmux_session.is_some() && !tmux_enabled(&ab_entry) {
+        return Err("this connection does not offer tmux sessions".into());
+    }
     let (width, height) = initial_session_size(
         &ab_entry.session_type,
         ab_entry.fullscreen_on_connect.unwrap_or(false),
@@ -4133,13 +4150,154 @@ fn entry_connect_request(
         key: entry_key.to_string(),
         folder: folder.to_string(),
     };
-    session_request_from_entry(ab_entry, display, Some(attribution))
+    let mut create_req = session_request_from_entry(ab_entry, display, Some(attribution))?;
+    create_req.tmux_session = tmux_session;
+    Ok(create_req)
+}
+
+/// Whether an entry, resolved to one protocol, offers tmux sessions (#325):
+/// an SSH protocol whose admin turned `tmux` on.
+fn tmux_enabled(e: &AddressBookEntry) -> bool {
+    e.session_type == "ssh" && e.tmux == Some(true)
 }
 
 /// Whether `id` may open ad-hoc connections: sessions to a target of their
 /// own choosing rather than a saved entry. The one place that decides it.
 pub fn can_connect_adhoc(id: &AuthIdentity) -> bool {
     id.has_role("poweruser")
+}
+
+/// The entry a user connects to, as the connect path uses it: read with its
+/// credentials, one protocol picked (`protocol`, or the primary), the
+/// folder's default credentials lent, and the user's credential variables
+/// filled in. Folder access is the caller's to check first. Shared by
+/// Connect and the tmux actions, so both log in with the same credentials.
+#[allow(clippy::result_large_err)]
+async fn resolve_connect_entry(
+    vault: &VaultBackends,
+    scope: &str,
+    folder: &str,
+    entry: &str,
+    protocol: Option<&str>,
+    id: &AuthIdentity,
+) -> Result<(String, AddressBookEntry), Response> {
+    // Read full entry (with credentials) from Vault
+    let ab_entry = match vault.get_entry(scope, folder, entry).await {
+        Ok(e) => e,
+        Err(VaultError::NotFound) => {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "entry not found"})),
+            )
+                .into_response())
+        }
+        Err(e) => {
+            return Err((
+                StatusCode::BAD_GATEWAY,
+                Json(json!({"error": e.to_string()})),
+            )
+                .into_response())
+        }
+    };
+
+    // The protocol to connect with, resolved to a plain single-type entry.
+    let Some((protocol_name, ab_entry)) = ab_entry.pick_protocol(protocol) else {
+        let msg = if protocol.is_some_and(|p| !p.trim().is_empty()) {
+            "protocol not found"
+        } else {
+            "entry not found"
+        };
+        return Err((StatusCode::NOT_FOUND, Json(json!({"error": msg}))).into_response());
+    };
+
+    let ab_entry = lend_folder_defaults(vault, scope, folder, entry, ab_entry).await;
+
+    // Resolve credential variable references ($domain_user, $domain_password, etc.)
+    if crate::vault::entry_credential_variables(&ab_entry).is_empty() {
+        return Ok((protocol_name, ab_entry));
+    }
+    let AuthIdentity::User { email, .. } = id else {
+        return Ok((protocol_name, ab_entry)); // API key users — no variable resolution
+    };
+    match vault.get_user_credentials(email).await {
+        Ok(user_creds) => {
+            match crate::vault::resolve_credential_variables(&ab_entry, &user_creds) {
+                Ok(resolved) => Ok((protocol_name, resolved)),
+                Err(missing) => Err((
+                    StatusCode::PRECONDITION_FAILED,
+                    Json(json!({
+                        "error": "missing credential variables",
+                        "missing_variables": missing,
+                    })),
+                )
+                    .into_response()),
+            }
+        }
+        Err(e) => {
+            tracing::warn!("Failed to read user credentials from Vault: {}", e);
+            Ok((protocol_name, ab_entry)) // Fall through with unresolved variables
+        }
+    }
+}
+
+/// An entry as rustguac itself uses it, with no user behind the request
+/// (the work bench sync): its primary protocol, with the folder's
+/// default credentials lent. Credential variables are not filled in.
+pub(crate) async fn system_entry(
+    vault: &VaultBackends,
+    scope: &str,
+    folder: &str,
+    entry: &str,
+) -> Result<AddressBookEntry, String> {
+    let e = vault
+        .get_entry(scope, folder, entry)
+        .await
+        .map_err(|e| e.to_string())?;
+    let (_, e) = e
+        .pick_protocol(None)
+        .ok_or_else(|| "the entry has no protocol".to_string())?;
+    Ok(lend_folder_defaults(vault, scope, folder, entry, e).await)
+}
+
+/// Run one command over SSH with an entry's stored credentials (and jump
+/// hosts), as the tmux actions do.
+pub(crate) async fn run_on_entry(
+    e: &AddressBookEntry,
+    command: &str,
+    timeout: std::time::Duration,
+) -> Result<crate::tunnel::CommandOutput, String> {
+    if e.session_type != "ssh" {
+        return Err("not an SSH entry".into());
+    }
+    let username = e
+        .username
+        .as_deref()
+        .filter(|u| !u.is_empty())
+        .ok_or("no username")?;
+    let hostname = e
+        .hostname
+        .as_deref()
+        .filter(|h| !h.is_empty())
+        .ok_or("no hostname")?;
+    let password = e.password.as_deref().filter(|p| !p.is_empty());
+    let private_key = e.private_key.as_deref().filter(|k| !k.is_empty());
+    if password.is_none() && private_key.is_none() {
+        return Err("no stored credentials".into());
+    }
+    let mut e = e.clone();
+    e.normalize_jump_hosts();
+    let jump_hosts = e.jump_hosts.clone().unwrap_or_default();
+    let target = crate::tunnel::CommandTarget {
+        hostname,
+        port: e.port.unwrap_or(22),
+        username,
+        password,
+        private_key,
+        jump_hosts: &jump_hosts,
+    };
+    crate::tunnel::run_command(target, command, timeout)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// POST /api/addressbook/folders/:scope/:folder/entries/:entry/connect — Create session from entry.
@@ -4169,74 +4327,18 @@ pub async fn ab_connect_entry(
         return resp;
     }
 
-    // Read full entry (with credentials) from Vault
-    let ab_entry = match vault.get_entry(&scope, &folder, &entry).await {
-        Ok(e) => e,
-        Err(VaultError::NotFound) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({"error": "entry not found"})),
-            )
-                .into_response()
-        }
-        Err(e) => {
-            return (
-                StatusCode::BAD_GATEWAY,
-                Json(json!({"error": e.to_string()})),
-            )
-                .into_response()
-        }
-    };
-
-    // The protocol to connect with, resolved to a plain single-type entry.
-    let Some((protocol_name, ab_entry)) = ab_entry.pick_protocol(req.protocol.as_deref()) else {
-        let msg = if req
-            .protocol
-            .as_deref()
-            .is_some_and(|p| !p.trim().is_empty())
-        {
-            "protocol not found"
-        } else {
-            "entry not found"
-        };
-        return (StatusCode::NOT_FOUND, Json(json!({"error": msg}))).into_response();
-    };
-
-    let ab_entry = lend_folder_defaults(vault.as_ref(), &scope, &folder, &entry, ab_entry).await;
-
-    // Resolve credential variable references ($domain_user, $domain_password, etc.)
-    let ab_entry = if !crate::vault::entry_credential_variables(&ab_entry).is_empty() {
-        let user_email = match &id {
-            AuthIdentity::User { email, .. } => Some(email.clone()),
-            _ => None,
-        };
-        if let Some(email) = user_email {
-            match vault.get_user_credentials(&email).await {
-                Ok(user_creds) => {
-                    match crate::vault::resolve_credential_variables(&ab_entry, &user_creds) {
-                        Ok(resolved) => resolved,
-                        Err(missing) => {
-                            return (
-                                StatusCode::PRECONDITION_FAILED,
-                                Json(json!({
-                                    "error": "missing credential variables",
-                                    "missing_variables": missing,
-                                })),
-                            )
-                                .into_response()
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to read user credentials from Vault: {}", e);
-                    ab_entry // Fall through with unresolved variables
-                }
-            }
-        } else {
-            ab_entry // API key users — no variable resolution
-        }
-    } else {
-        ab_entry
+    let (protocol_name, ab_entry) = match resolve_connect_entry(
+        vault.as_ref(),
+        &scope,
+        &folder,
+        &entry,
+        req.protocol.as_deref(),
+        &id,
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(resp) => return resp,
     };
 
     let ab_entry_key = format!("{}/{}/{}", scope, folder, entry);
@@ -4300,6 +4402,797 @@ pub async fn ab_connect_entry(
             };
             (status, Json(json!({"error": msg}))).into_response()
         }
+    }
+}
+
+/// Query of the tmux endpoints: which of the entry's protocols (#296).
+#[derive(Deserialize)]
+pub struct TmuxQuery {
+    #[serde(default)]
+    pub protocol: Option<String>,
+}
+
+/// How long listing tmux sessions may take, login and jump hosts included.
+const TMUX_COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+/// How long starting tmux sessions may take: each new shell gets a few
+/// seconds to print its prompt before its commands are typed.
+const TMUX_START_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// The checks every tmux endpoint shares: an operator with access to the
+/// folder, and an entry protocol that offers tmux sessions. Gives the
+/// caller, the protocol's name and the resolved entry.
+#[allow(clippy::result_large_err)]
+async fn tmux_entry(
+    vault: &VaultBackends,
+    identity: Option<Extension<AuthIdentity>>,
+    scope: &str,
+    folder: &str,
+    entry: &str,
+    protocol: Option<&str>,
+) -> Result<(AuthIdentity, String, AddressBookEntry), Response> {
+    ssh_entry(vault, identity, scope, folder, entry, protocol, true).await
+}
+
+/// [`tmux_entry`]'s checks; `require_tmux` false accepts any SSH protocol
+/// (file uploads).
+#[allow(clippy::result_large_err)]
+async fn ssh_entry(
+    vault: &VaultBackends,
+    identity: Option<Extension<AuthIdentity>>,
+    scope: &str,
+    folder: &str,
+    entry: &str,
+    protocol: Option<&str>,
+    require_tmux: bool,
+) -> Result<(AuthIdentity, String, AddressBookEntry), Response> {
+    let err =
+        |status: StatusCode, msg: &str| (status, Json(json!({ "error": msg }))).into_response();
+    let id = match identity {
+        Some(Extension(id)) if id.has_role("operator") => id,
+        _ => return Err(err(StatusCode::FORBIDDEN, "operator role required")),
+    };
+    check_folder_access(vault, scope, folder, &id).await?;
+    let (protocol_name, e) =
+        resolve_connect_entry(vault, scope, folder, entry, protocol, &id).await?;
+    if require_tmux && !tmux_enabled(&e) {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "this connection does not offer tmux sessions",
+        ));
+    }
+    if e.session_type != "ssh" {
+        return Err(err(StatusCode::BAD_REQUEST, "not an SSH connection"));
+    }
+    Ok((id, protocol_name, e))
+}
+
+/// Run a tmux command (`crate::tmux`) on an entry's host: [`tmux_entry`]'s
+/// checks, then one SSH exec with the entry's stored credentials. The error
+/// is the response to send.
+#[allow(clippy::too_many_arguments, clippy::result_large_err)]
+async fn run_entry_tmux_command(
+    vault: &VaultBackends,
+    identity: Option<Extension<AuthIdentity>>,
+    scope: &str,
+    folder: &str,
+    entry: &str,
+    protocol: Option<&str>,
+    command: &str,
+    action: &str,
+    timeout: std::time::Duration,
+) -> Result<crate::tunnel::CommandOutput, Response> {
+    run_entry_command(
+        vault, identity, scope, folder, entry, protocol, command, None, action, timeout, true,
+    )
+    .await
+}
+
+/// [`run_entry_tmux_command`], with optional stdin, and for any SSH
+/// protocol when `require_tmux` is false.
+#[allow(clippy::too_many_arguments, clippy::result_large_err)]
+async fn run_entry_command(
+    vault: &VaultBackends,
+    identity: Option<Extension<AuthIdentity>>,
+    scope: &str,
+    folder: &str,
+    entry: &str,
+    protocol: Option<&str>,
+    command: &str,
+    input: Option<&[u8]>,
+    action: &str,
+    timeout: std::time::Duration,
+    require_tmux: bool,
+) -> Result<crate::tunnel::CommandOutput, Response> {
+    let err =
+        |status: StatusCode, msg: &str| (status, Json(json!({ "error": msg }))).into_response();
+    let (id, protocol_name, e) = ssh_entry(
+        vault,
+        identity,
+        scope,
+        folder,
+        entry,
+        protocol,
+        require_tmux,
+    )
+    .await?;
+    // Only stored credentials: an entry that prompts at connect time has
+    // nothing rustguac could log in with on the user's behalf.
+    let password = e.password.as_deref().filter(|p| !p.is_empty());
+    let private_key = e.private_key.as_deref().filter(|k| !k.is_empty());
+    let username = e.username.as_deref().unwrap_or_default();
+    if e.prompt_credentials == Some(true)
+        || username.is_empty()
+        || (password.is_none() && private_key.is_none())
+    {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": "this connection has no stored credentials, so rustguac cannot list or start its tmux sessions; type a session name instead",
+                "reason": "no_stored_credentials",
+            })),
+        )
+            .into_response());
+    }
+    let Some(hostname) = e.hostname.as_deref().filter(|h| !h.is_empty()) else {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "this connection has no hostname",
+        ));
+    };
+    let mut e = e.clone();
+    e.normalize_jump_hosts();
+    let jump_hosts = e.jump_hosts.clone().unwrap_or_default();
+    tracing::info!(
+        user = %id.display_name(),
+        scope = %scope,
+        folder = %folder,
+        entry = %entry,
+        protocol = %protocol_name,
+        action = %action,
+        "tmux command on an entry's host"
+    );
+    let target = crate::tunnel::CommandTarget {
+        hostname,
+        port: e.port.unwrap_or(22),
+        username,
+        password,
+        private_key,
+        jump_hosts: &jump_hosts,
+    };
+    crate::tunnel::run_command_input(target, command, input, timeout)
+        .await
+        .map_err(|e| {
+            tracing::warn!(entry = %entry, action = %action, error = %e, "tmux command failed");
+            err(
+                StatusCode::BAD_GATEWAY,
+                &format!("the host could not be asked: {e}"),
+            )
+        })
+}
+
+/// GET /api/addressbook/folders/:scope/:folder/entries/:entry/tmux — the
+/// tmux sessions on an SSH entry's host (#325), for an entry with `tmux`
+/// on. Logs in with the entry's stored credentials, so each call is a real
+/// login on the host: the page asks only when the user opens the menu.
+/// `{"installed": false}` when the host has no tmux.
+pub async fn ab_tmux_list(
+    identity: Option<Extension<AuthIdentity>>,
+    Extension(vault): Extension<VaultState>,
+    Path((scope, folder, entry)): Path<(String, String, String)>,
+    Query(q): Query<TmuxQuery>,
+) -> Response {
+    let out = match run_entry_tmux_command(
+        vault.as_ref(),
+        identity,
+        &scope,
+        &folder,
+        &entry,
+        q.protocol.as_deref(),
+        &crate::tmux::list_command(),
+        "list",
+        TMUX_COMMAND_TIMEOUT,
+    )
+    .await
+    {
+        Ok(o) => o,
+        Err(resp) => return resp,
+    };
+    match crate::tmux::parse_listing(&out.stdout) {
+        Some(listing) => Json(json!(listing)).into_response(),
+        None => {
+            tracing::warn!(entry = %entry, exit_status = ?out.exit_status, "tmux listing not understood");
+            let detail = out.stderr.lines().next().unwrap_or("").trim();
+            let msg = if detail.is_empty() {
+                "the host's reply to the tmux listing was not understood".to_string()
+            } else {
+                format!("the tmux listing failed: {detail}")
+            };
+            (StatusCode::BAD_GATEWAY, Json(json!({ "error": msg }))).into_response()
+        }
+    }
+}
+
+/// GET /api/addressbook/folders/:scope/:folder/entries/:entry/tmux/repos
+/// — every git.example.com repo under the login's `~/GitLab` and the tmux
+/// sessions running in each, plus the plain tmux listing, from one
+/// login on the host. Same checks and credentials as [`ab_tmux_list`], so
+/// it is the entry's own login's repos and sessions only.
+pub async fn ab_tmux_repos(
+    identity: Option<Extension<AuthIdentity>>,
+    Extension(vault): Extension<VaultState>,
+    Extension(info): Extension<DashboardInfo>,
+    Path((scope, folder, entry)): Path<(String, String, String)>,
+    Query(q): Query<TmuxQuery>,
+) -> Response {
+    let out = match run_entry_tmux_command(
+        vault.as_ref(),
+        identity,
+        &scope,
+        &folder,
+        &entry,
+        q.protocol.as_deref(),
+        &crate::tmux::repos_command(&info.tmux),
+        "repos",
+        TMUX_COMMAND_TIMEOUT,
+    )
+    .await
+    {
+        Ok(o) => o,
+        Err(resp) => return resp,
+    };
+    match crate::tmux::parse_repos(&out.stdout) {
+        Some(listing) => Json(with_repo_command(json!(listing), &info.tmux)).into_response(),
+        None => {
+            tracing::warn!(entry = %entry, exit_status = ?out.exit_status, "repo listing not understood");
+            let detail = out.stderr.lines().next().unwrap_or("").trim();
+            let msg = if detail.is_empty() {
+                "the host's reply to the repo listing was not understood".to_string()
+            } else {
+                format!("the repo listing failed: {detail}")
+            };
+            (StatusCode::BAD_GATEWAY, Json(json!({ "error": msg }))).into_response()
+        }
+    }
+}
+
+/// GET /api/addressbook/folders/:scope/:folder/entries/:entry/tmux/dashboard
+/// — the dashboard's view of one host: [`ab_tmux_repos`] plus each
+/// session's active-pane command and title, and for panes running Claude
+/// Code, its state and the end of what it said, read off the screen. One
+/// login, as the entry's user, so only that user's sessions.
+pub async fn ab_tmux_dashboard(
+    identity: Option<Extension<AuthIdentity>>,
+    Extension(vault): Extension<VaultState>,
+    Extension(info): Extension<DashboardInfo>,
+    Path((scope, folder, entry)): Path<(String, String, String)>,
+    Query(q): Query<TmuxQuery>,
+) -> Response {
+    let out = match run_entry_tmux_command(
+        vault.as_ref(),
+        identity,
+        &scope,
+        &folder,
+        &entry,
+        q.protocol.as_deref(),
+        &crate::tmux::dashboard_command(&info.tmux),
+        "dashboard",
+        TMUX_COMMAND_TIMEOUT,
+    )
+    .await
+    {
+        Ok(o) => o,
+        Err(resp) => return resp,
+    };
+    match crate::tmux::parse_dashboard(&out.stdout) {
+        Some(listing) => Json(with_repo_command(json!(listing), &info.tmux)).into_response(),
+        None => {
+            tracing::warn!(entry = %entry, exit_status = ?out.exit_status, "dashboard listing not understood");
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": "the host's reply was not understood" })),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// Body of a send: what to type into which running session.
+#[derive(Deserialize)]
+pub struct TmuxSendRequest {
+    pub session: String,
+    pub text: String,
+    /// Press Enter after the text. Default: true.
+    #[serde(default = "default_true_send")]
+    pub enter: bool,
+}
+fn default_true_send() -> bool {
+    true
+}
+
+/// POST /api/addressbook/folders/:scope/:folder/entries/:entry/tmux/send —
+/// type an answer into a running tmux session (the dashboard's answer box).
+/// Never creates a session. Audit-logged with the session and the
+/// answer's length, never its text.
+#[allow(clippy::too_many_arguments)]
+pub async fn ab_tmux_send(
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: axum::http::HeaderMap,
+    identity: Option<Extension<AuthIdentity>>,
+    trusted: Option<Extension<TrustedProxies>>,
+    Extension(database): Extension<Db>,
+    Extension(vault): Extension<VaultState>,
+    Path((scope, folder, entry)): Path<(String, String, String)>,
+    Query(q): Query<TmuxQuery>,
+    Json(req): Json<TmuxSendRequest>,
+) -> Response {
+    let Some(command) = crate::tmux::send_command(&req.session, &req.text, req.enter) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": format!("not sent: a session name is {}, and an answer at most {} characters", crate::tmux::name_error(), crate::tmux::MAX_SEND_LEN) })),
+        )
+            .into_response();
+    };
+    let who = identity
+        .as_ref()
+        .map(|Extension(id)| id.display_name().to_string())
+        .unwrap_or_default();
+    let out = match run_entry_tmux_command(
+        vault.as_ref(),
+        identity,
+        &scope,
+        &folder,
+        &entry,
+        q.protocol.as_deref(),
+        &command,
+        "send",
+        TMUX_COMMAND_TIMEOUT,
+    )
+    .await
+    {
+        Ok(o) => o,
+        Err(resp) => return resp,
+    };
+    let result = crate::tmux::parse_send(&out.stdout);
+    let ip = audit_client_ip(&headers, &addr, trusted.as_ref());
+    let details = json!({
+        "protocol": q.protocol,
+        "session": req.session,
+        "length": req.text.chars().count(),
+        "enter": req.enter,
+        "result": result,
+    })
+    .to_string();
+    log_ab_event(
+        &database,
+        &who,
+        "tmux_send",
+        &scope,
+        &folder,
+        Some(&entry),
+        &ip,
+        Some(&details),
+    )
+    .await;
+    match result {
+        Some("sent") => Json(json!({ "sent": true })).into_response(),
+        Some("no_session") => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "that tmux session is not running" })),
+        )
+            .into_response(),
+        Some(_) => (
+            StatusCode::CONFLICT,
+            Json(json!({ "error": "tmux is not installed on this host" })),
+        )
+            .into_response(),
+        None => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({ "error": "the host's reply was not understood" })),
+        )
+            .into_response(),
+    }
+}
+
+/// A repo listing with `default_command`: `[tmux] repo_command`, the
+/// startup command the pages offer for a new repo session until the person
+/// sets their own.
+fn with_repo_command(
+    mut listing: serde_json::Value,
+    cfg: &crate::tmux::TmuxConfig,
+) -> serde_json::Value {
+    if let Some(o) = listing.as_object_mut() {
+        o.insert("default_command".into(), json!(cfg.repo_command));
+    }
+    listing
+}
+
+/// What the tmux workspace and the dashboard need to know about this
+/// console.
+#[derive(Clone, Default)]
+pub struct DashboardInfo {
+    /// `[tmux]`.
+    pub tmux: crate::tmux::TmuxConfig,
+    /// `[workbench]`, when configured.
+    pub workbench: Option<crate::workbench::WorkbenchConfig>,
+}
+
+/// GET /api/dashboard/config — which hosts the dashboard shows by default:
+/// entries on the work bench host, except other people's work bench
+/// folders (an admin can see those, but they are someone else's sessions).
+pub async fn dashboard_config(
+    identity: Option<Extension<AuthIdentity>>,
+    Extension(info): Extension<DashboardInfo>,
+) -> Response {
+    let id = match identity {
+        Some(Extension(id)) if id.has_role("operator") => id,
+        _ => {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({"error": "operator role required"})),
+            )
+                .into_response()
+        }
+    };
+    let Some(wb) = info.workbench.as_ref() else {
+        return Json(json!({ "workbench_host": null })).into_response();
+    };
+    let my_folder = match &id {
+        AuthIdentity::User { email, .. } => Some(wb.folder_of(email)),
+        _ => None,
+    };
+    Json(json!({
+        "workbench_host": wb.host,
+        "workbench_prefix": wb.folder_prefix,
+        "workbench_scope": wb.scope,
+        "my_folder": my_folder,
+    }))
+    .into_response()
+}
+
+/// Query of an upload: which protocol, and the file's name.
+#[derive(Deserialize)]
+pub struct UploadQuery {
+    #[serde(default)]
+    pub protocol: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+/// POST /api/addressbook/folders/:scope/:folder/entries/:entry/upload?name=
+/// — save the body (an image pasted, or a file dropped, into a terminal
+/// session) on the entry's host as its login, under
+/// `~/.cache/console-uploads/`, and return the saved path for the page to
+/// type in. Any SSH protocol with stored credentials. Audit-logged with the
+/// name and size.
+#[allow(clippy::too_many_arguments)]
+pub async fn ab_upload(
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: axum::http::HeaderMap,
+    identity: Option<Extension<AuthIdentity>>,
+    trusted: Option<Extension<TrustedProxies>>,
+    Extension(database): Extension<Db>,
+    Extension(vault): Extension<VaultState>,
+    Path((scope, folder, entry)): Path<(String, String, String)>,
+    Query(q): Query<UploadQuery>,
+    body: axum::body::Bytes,
+) -> Response {
+    if body.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "the file is empty" })),
+        )
+            .into_response();
+    }
+    if body.len() > crate::upload::MAX_BYTES {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(json!({ "error": format!("files are at most {} MB", crate::upload::MAX_BYTES / 1024 / 1024) })),
+        )
+            .into_response();
+    }
+    let name = crate::upload::clean_name(q.name.as_deref().unwrap_or("file"));
+    let Some(command) = crate::upload::save_command(&name) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "unusable file name" })),
+        )
+            .into_response();
+    };
+    let who = identity
+        .as_ref()
+        .map(|Extension(id)| id.display_name().to_string())
+        .unwrap_or_default();
+    let out = match run_entry_command(
+        vault.as_ref(),
+        identity,
+        &scope,
+        &folder,
+        &entry,
+        q.protocol.as_deref(),
+        &command,
+        Some(&body),
+        "upload",
+        TMUX_START_TIMEOUT,
+        false,
+    )
+    .await
+    {
+        Ok(o) => o,
+        Err(resp) => return resp,
+    };
+    let saved = crate::upload::parse_saved(&out.stdout);
+    let ip = audit_client_ip(&headers, &addr, trusted.as_ref());
+    let details = json!({
+        "protocol": q.protocol,
+        "name": name,
+        "bytes": body.len(),
+        "saved": saved.is_some(),
+    })
+    .to_string();
+    log_ab_event(
+        &database,
+        &who,
+        "file_upload",
+        &scope,
+        &folder,
+        Some(&entry),
+        &ip,
+        Some(&details),
+    )
+    .await;
+    match saved {
+        Some(path) => {
+            Json(json!({ "path": path, "name": name, "bytes": body.len() })).into_response()
+        }
+        None => {
+            let detail = out.stderr.lines().next().unwrap_or("").trim().to_string();
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": if detail.is_empty() { "the host did not save the file".to_string() } else { format!("the host did not save the file: {detail}") } })),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// Body of a tmux start: the sessions to start.
+#[derive(Deserialize)]
+pub struct TmuxStartRequest {
+    pub sessions: Vec<crate::tmux::StartSpec>,
+}
+
+/// POST /api/addressbook/folders/:scope/:folder/entries/:entry/tmux/start
+/// — start named tmux sessions on an SSH entry's host and type each one's
+/// startup commands into it (#325). A session that is already running is
+/// left exactly as it is: nothing is typed into it, and it is reported as
+/// `running`. The page then attaches to all of them as usual. Same rules as
+/// listing; nothing here ends a session.
+#[allow(clippy::too_many_arguments)]
+pub async fn ab_tmux_start(
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: axum::http::HeaderMap,
+    identity: Option<Extension<AuthIdentity>>,
+    trusted: Option<Extension<TrustedProxies>>,
+    Extension(database): Extension<Db>,
+    Extension(vault): Extension<VaultState>,
+    Path((scope, folder, entry)): Path<(String, String, String)>,
+    Query(q): Query<TmuxQuery>,
+    Json(req): Json<TmuxStartRequest>,
+) -> Response {
+    if let Err(e) = crate::tmux::check_specs(&req.sessions) {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response();
+    }
+    let Some(command) = crate::tmux::start_command(&req.sessions) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "these sessions cannot be started" })),
+        )
+            .into_response();
+    };
+    let who = identity
+        .as_ref()
+        .map(|Extension(id)| id.display_name().to_string())
+        .unwrap_or_default();
+    let out = match run_entry_tmux_command(
+        vault.as_ref(),
+        identity,
+        &scope,
+        &folder,
+        &entry,
+        q.protocol.as_deref(),
+        &command,
+        "start",
+        TMUX_START_TIMEOUT,
+    )
+    .await
+    {
+        Ok(o) => o,
+        Err(resp) => return resp,
+    };
+    let Some(outcome) = crate::tmux::parse_start(&out.stdout, &req.sessions) else {
+        tracing::warn!(entry = %entry, exit_status = ?out.exit_status, "tmux start not understood");
+        let detail = out.stderr.lines().next().unwrap_or("").trim();
+        let msg = if detail.is_empty() {
+            "the host's reply to the tmux start was not understood".to_string()
+        } else {
+            format!("starting the tmux sessions failed: {detail}")
+        };
+        return (StatusCode::BAD_GATEWAY, Json(json!({ "error": msg }))).into_response();
+    };
+    if !outcome.installed {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({ "error": "tmux is not installed on this host", "installed": false })),
+        )
+            .into_response();
+    }
+    if outcome.no_base64 {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({ "error": "this host has tmux but no base64 command, which startup commands need" })),
+        )
+            .into_response();
+    }
+    // Names and what happened to them only: the commands themselves can
+    // carry anything, so they stay out of the audit log.
+    let ip = audit_client_ip(&headers, &addr, trusted.as_ref());
+    let details = json!({
+        "protocol": q.protocol,
+        "sessions": outcome.sessions.iter().map(|s| json!({
+            "name": s.name,
+            "state": s.state,
+            "commands_sent": s.commands_sent,
+        })).collect::<Vec<_>>(),
+    })
+    .to_string();
+    log_ab_event(
+        &database,
+        &who,
+        "tmux_start",
+        &scope,
+        &folder,
+        Some(&entry),
+        &ip,
+        Some(&details),
+    )
+    .await;
+    Json(json!(outcome)).into_response()
+}
+
+/// A saved tmux start (#325): a name and the sessions it starts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TmuxPreset {
+    pub name: String,
+    pub sessions: Vec<crate::tmux::StartSpec>,
+}
+
+/// Body of a presets save: the whole list, replacing what was saved.
+#[derive(Deserialize)]
+pub struct TmuxPresetsBody {
+    pub presets: Vec<TmuxPreset>,
+}
+
+/// Most presets one user may keep for one entry protocol.
+const MAX_TMUX_PRESETS: usize = 30;
+
+/// Why a list of presets cannot be saved, if it cannot.
+fn check_tmux_presets(presets: &[TmuxPreset]) -> Result<(), String> {
+    if presets.len() > MAX_TMUX_PRESETS {
+        return Err(format!("at most {MAX_TMUX_PRESETS} presets per connection"));
+    }
+    let mut seen = std::collections::HashSet::new();
+    for p in presets {
+        let name = p.name.trim();
+        if name.is_empty() || name.chars().count() > 64 || name.chars().any(char::is_control) {
+            return Err("preset names are 1 to 64 characters".into());
+        }
+        if !seen.insert(name) {
+            return Err(format!("two presets are named {name}"));
+        }
+        crate::tmux::check_specs(&p.sessions).map_err(|e| format!("{name}: {e}"))?;
+    }
+    Ok(())
+}
+
+/// Who a preset belongs to, and for which entry protocol.
+fn tmux_preset_key(
+    id: &AuthIdentity,
+    scope: &str,
+    folder: &str,
+    entry: &str,
+    protocol: &str,
+) -> (String, String) {
+    let owner = match id {
+        AuthIdentity::ApiKey(name) => format!("key:{name}"),
+        AuthIdentity::User { email, .. } => format!("user:{}", email.to_lowercase()),
+    };
+    (owner, format!("{scope}/{folder}/{entry}/{protocol}"))
+}
+
+/// GET /api/addressbook/folders/:scope/:folder/entries/:entry/tmux/presets
+/// — the caller's own saved tmux starts for this entry protocol (#325).
+pub async fn ab_tmux_presets_get(
+    identity: Option<Extension<AuthIdentity>>,
+    Extension(database): Extension<Db>,
+    Extension(vault): Extension<VaultState>,
+    Path((scope, folder, entry)): Path<(String, String, String)>,
+    Query(q): Query<TmuxQuery>,
+) -> Response {
+    let (id, protocol, _) = match tmux_entry(
+        vault.as_ref(),
+        identity,
+        &scope,
+        &folder,
+        &entry,
+        q.protocol.as_deref(),
+    )
+    .await
+    {
+        Ok(t) => t,
+        Err(resp) => return resp,
+    };
+    let (owner, key) = tmux_preset_key(&id, &scope, &folder, &entry, &protocol);
+    let stored =
+        tokio::task::spawn_blocking(move || db::get_tmux_presets(&database, &owner, &key)).await;
+    match stored {
+        Ok(Ok(json)) => {
+            let presets: Vec<TmuxPreset> = json
+                .and_then(|j| serde_json::from_str(&j).ok())
+                .unwrap_or_default();
+            Json(json!({ "presets": presets })).into_response()
+        }
+        _ => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": "the presets could not be read" })),
+        )
+            .into_response(),
+    }
+}
+
+/// PUT /api/addressbook/folders/:scope/:folder/entries/:entry/tmux/presets
+/// — replace the caller's saved tmux starts for this entry protocol (#325).
+/// An empty list forgets them.
+pub async fn ab_tmux_presets_put(
+    identity: Option<Extension<AuthIdentity>>,
+    Extension(database): Extension<Db>,
+    Extension(vault): Extension<VaultState>,
+    Path((scope, folder, entry)): Path<(String, String, String)>,
+    Query(q): Query<TmuxQuery>,
+    Json(mut body): Json<TmuxPresetsBody>,
+) -> Response {
+    let (id, protocol, _) = match tmux_entry(
+        vault.as_ref(),
+        identity,
+        &scope,
+        &folder,
+        &entry,
+        q.protocol.as_deref(),
+    )
+    .await
+    {
+        Ok(t) => t,
+        Err(resp) => return resp,
+    };
+    for p in &mut body.presets {
+        p.name = p.name.trim().to_string();
+    }
+    if let Err(e) = check_tmux_presets(&body.presets) {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response();
+    }
+    let (owner, key) = tmux_preset_key(&id, &scope, &folder, &entry, &protocol);
+    let json = (!body.presets.is_empty())
+        .then(|| serde_json::to_string(&body.presets).unwrap_or_default());
+    let saved = tokio::task::spawn_blocking(move || {
+        db::set_tmux_presets(&database, &owner, &key, json.as_deref())
+    })
+    .await;
+    match saved {
+        Ok(Ok(())) => Json(json!({ "presets": body.presets })).into_response(),
+        _ => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": "the presets could not be saved" })),
+        )
+            .into_response(),
     }
 }
 
@@ -7542,6 +8435,7 @@ pub async fn quick_connect(
         address_book_entry: None,
         address_book_folder: None,
         address_book_protocol: None,
+        tmux_session: None,
         entry_display_name: None,
         max_recordings: None,
         login_script: None,
@@ -7824,6 +8718,7 @@ mod tests {
             address_book_entry: Some(ab_entry_key.clone()),
             address_book_folder: Some(folder.to_string()),
             address_book_protocol: None,
+            tmux_session: None,
             entry_display_name: ab_entry.display_name.clone(),
             max_recordings: ab_entry.max_recordings,
             login_script: ab_entry.login_script,
@@ -7921,6 +8816,7 @@ mod tests {
             address_book_entry: Some(ab_entry_key),
             address_book_folder: Some(folder.to_string()),
             address_book_protocol: None,
+            tmux_session: None,
             entry_display_name: ab_entry.display_name.clone(),
             max_recordings: ab_entry.max_recordings,
             login_script: ab_entry.login_script,
@@ -8056,6 +8952,68 @@ mod tests {
                 assert_eq!(new.reuse_fingerprint(), old.reuse_fingerprint());
             }
         }
+    }
+
+    #[test]
+    fn tmux_presets_are_checked_and_keyed_per_user() {
+        let preset = |name: &str, sessions: serde_json::Value| -> TmuxPreset {
+            serde_json::from_value(json!({ "name": name, "sessions": sessions })).unwrap()
+        };
+        let ok = preset(
+            "fleet",
+            json!([{ "name": "billing", "dir": "~/b", "commands": "claude" }]),
+        );
+        assert!(check_tmux_presets(std::slice::from_ref(&ok)).is_ok());
+        assert!(
+            check_tmux_presets(&[ok.clone(), ok.clone()]).is_err(),
+            "duplicate names"
+        );
+        assert!(check_tmux_presets(&[preset("", json!([{ "name": "a" }]))]).is_err());
+        assert!(check_tmux_presets(&[preset("x", json!([{ "name": "a b" }]))]).is_err());
+        assert!(check_tmux_presets(&[preset("x", json!([]))]).is_err());
+        let user = AuthIdentity::User {
+            email: "Jo@Example.com".into(),
+            role: "operator".into(),
+            groups: vec![],
+        };
+        assert_eq!(
+            tmux_preset_key(&user, "shared", "ops", "web", "ssh"),
+            (
+                "user:jo@example.com".to_string(),
+                "shared/ops/web/ssh".to_string()
+            )
+        );
+        let key = AuthIdentity::ApiKey("ci".into());
+        assert_eq!(
+            tmux_preset_key(&key, "shared", "ops", "web", "ssh").0,
+            "key:ci"
+        );
+    }
+
+    #[test]
+    fn a_tmux_session_needs_an_ssh_entry_with_tmux_on() {
+        let req = |n: &str| {
+            serde_json::from_value::<ConnectRequest>(json!({ "tmux_session": n })).unwrap()
+        };
+        let connect = |e: AddressBookEntry, n: &str| {
+            entry_connect_request(e, req(n), "shared/ops/host-1", "ops")
+        };
+        let mut ssh = full_entry("ssh");
+        ssh.tmux = Some(true);
+        let deploy = connect(ssh.clone(), "deploy").unwrap();
+        assert_eq!(deploy.tmux_session.as_deref(), Some("deploy"));
+        // Another name is another session: a Pending one is never reused for it.
+        let logs = connect(ssh.clone(), "logs").unwrap();
+        assert_ne!(deploy.reuse_fingerprint(), logs.reuse_fingerprint());
+        // Empty is none: a plain shell.
+        assert_eq!(connect(ssh.clone(), "").unwrap().tmux_session, None);
+        // tmux off on the entry, or not SSH: refused.
+        let mut off = ssh.clone();
+        off.tmux = None;
+        assert!(connect(off, "deploy").is_err());
+        let mut rdp = full_entry("rdp");
+        rdp.tmux = Some(true);
+        assert!(connect(rdp, "deploy").is_err());
     }
 
     #[test]

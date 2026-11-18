@@ -37,8 +37,11 @@ One spec per change, named after the branch that introduced it:
 | `search-under-modals` | a page modal (the ad-hoc editor included) covers the search box |
 | `zero-click-fullscreen` | #257: same-tab iframe sized from the measured viewport |
 | `connections-adhoc` | #295: Connect to a host opens the entry editor in ad-hoc mode (no name, Connect for Save, entry-only options hidden for non-admins), offers the caller's credential variable names, posts to `/api/addressbook/adhoc/connect` and never `/api/sessions`; ephemeral keypair; missing variable named; admin Save as entry keeps `$var` references; works without Vault and from `#adhoc`; no button for operators |
+| `dashboard` | Mine by default (your own work bench folder only), All users on request with whose each session is, remembered; prompts, then finished replies, at the top with the excerpt; one-tap choices send the digit without Enter, answers send with it; Open and Open all go to the tmux workspace; a black repo starts with your command or the console's default; fits a phone |
+| `tmux-repos` | The workspace's + popover lists the login's `~/GitLab` repos from one host login; green dot opens the session in that folder, black dot starts one there with the remembered startup command (a name taken elsewhere gets `-2`); one search filters sessions and repos; Enter opens the first match; no tmux disables the rows; fits a phone |
 | `recordings-mp4` | #241: the mp4 button converts, shows progress and downloads; refused while live; hidden without server support |
 | `multi-protocol-entries` | #296: one row per host with a badge for every protocol (wrapping, none hidden), Connect for the primary and a menu for the rest; Host box and protocol tabs; an old single-protocol entry saves as one protocol |
+| `tmux-sessions` | #325: an SSH protocol with tmux gets a Connect menu that asks the host for its sessions (spinner, list, or why not: no tmux, login refused, credentials typed at connect); a session opens in the tmux workspace and a second pick adds a tab to it; the workspace reconnects a lost tab, stops on a refusal, leaves a detached one to the user, splits, adds and ends sessions; the editor saves `tmux` |
 
 The fixture suppresses the first-visit onboarding tour (`options.onboarding`
 re-enables it) and defaults to the admin role; pass `role` to test gating.

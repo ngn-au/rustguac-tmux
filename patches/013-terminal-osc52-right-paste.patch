@@ -1,0 +1,129 @@
+diff --git a/src/terminal/terminal-handlers.c b/src/terminal/terminal-handlers.c
+index 10401bab..ee44fd4e 100644
+--- a/src/terminal/terminal-handlers.c
++++ b/src/terminal/terminal-handlers.c
+@@ -32,6 +32,7 @@
+ #include <errno.h>
+ #include <stdbool.h>
+ #include <stdlib.h>
++#include <string.h>
+ #include <wchar.h>
+ 
+ /**
+@@ -1579,6 +1580,70 @@ int guac_terminal_xterm_palette(guac_terminal* term, unsigned char c) {
+ 
+ }
+ 
++/**
++ * The most OSC 52 data accepted, base64 included (a 4 MiB copy decodes to
++ * 3 MiB, well over the clipboard's own limit, which truncates it anyway).
++ */
++#define GUAC_TERMINAL_OSC52_MAX (4 * 1024 * 1024)
++
++int guac_terminal_clipboard_osc(guac_terminal* term, unsigned char c) {
++
++    /* OSC 52 ; <targets> ; <base64> ST: an application (tmux copy mode,
++     * Claude Code, vim, ...) setting the clipboard. The text goes to the
++     * terminal's clipboard and on to the browser, as a selection does. A
++     * query ("?") is not answered: the clipboard is not readable this way. */
++    static char* data = NULL;
++    static int length = 0;
++    static int capacity = 0;
++
++    /* Stop on ECMA-48 ST (String Terminator) */
++    if (c == 0x9C || c == 0x5C || c == 0x07) {
++
++        if (data != NULL) {
++
++            /* ST as ESC \ leaves its ESC here */
++            if (length > 0 && data[length - 1] == 0x1B)
++                length--;
++            data[length] = '\0';
++
++            /* Skip the targets ("c", "p", "s0", ... or empty) */
++            char* payload = memchr(data, ';', length);
++            if (payload != NULL && strcmp(payload + 1, "?") != 0) {
++                payload++;
++                int decoded = guac_protocol_decode_base64(payload);
++                guac_terminal_clipboard_reset(term, "text/plain");
++                guac_common_clipboard_append(term->clipboard, payload, decoded);
++                guac_common_clipboard_send(term->clipboard, term->client);
++            }
++
++            free(data);
++            data = NULL;
++        }
++
++        length = 0;
++        capacity = 0;
++        term->char_handler = guac_terminal_echo;
++        return 0;
++
++    }
++
++    /* Store everything else, growing the buffer, up to the limit */
++    if (length + 1 >= capacity) {
++        if (capacity >= GUAC_TERMINAL_OSC52_MAX)
++            return 0;
++        int grown = capacity ? capacity * 2 : 4096;
++        char* bigger = realloc(data, grown);
++        if (bigger == NULL)
++            return 0;
++        data = bigger;
++        capacity = grown;
++    }
++    data[length++] = (char) c;
++
++    return 0;
++
++}
++
+ int guac_terminal_unknown_osc(guac_terminal* term, unsigned char c) {
+     /* Stop on ECMA-48 ST (String Terminator) */
+     if (c == 0x9C || c == 0x5C || c == 0x07)
+@@ -1626,6 +1691,10 @@ int guac_terminal_osc(guac_terminal* term, unsigned char c) {
+         else if (operation == 4)
+             term->char_handler = guac_terminal_xterm_palette;
+ 
++        /* Set the clipboard (xterm OSC 52) */
++        else if (operation == 52)
++            term->char_handler = guac_terminal_clipboard_osc;
++
+         /* Unknown OSC */
+         else
+             term->char_handler = guac_terminal_unknown_osc;
+diff --git a/src/terminal/terminal.c b/src/terminal/terminal.c
+index b57e41dc..22d194dc 100644
+--- a/src/terminal/terminal.c
++++ b/src/terminal/terminal.c
+@@ -2823,9 +2823,11 @@ static int __guac_terminal_send_mouse(guac_terminal* term, guac_user* user,
+ 
+     /* The application asked for the mouse (xterm DECSET 1000/1002/1003):
+      * report to it rather than select or scroll here. Shift keeps the local
+-     * behaviour, as in xterm, so text can still be selected and copied. */
++     * behaviour, as in xterm, so text can still be selected and copied. The
++     * right button is kept for local paste, as before, and not reported. */
+     if ((term->mouse_report_x11 || term->mouse_report_button || term->mouse_report_any)
+-            && !term->mod_shift)
++            && !term->mod_shift
++            && !((pressed_mask | released_mask | mask) & GUAC_CLIENT_MOUSE_RIGHT))
+         return __guac_terminal_report_mouse(term, x, y, mask, pressed_mask, released_mask);
+ 
+     /* Paste contents of clipboard on right or middle mouse button up */
+diff --git a/src/terminal/terminal/terminal-handlers.h b/src/terminal/terminal/terminal-handlers.h
+index c3ddb476..ea9a460f 100644
+--- a/src/terminal/terminal/terminal-handlers.h
++++ b/src/terminal/terminal/terminal-handlers.h
+@@ -200,6 +200,12 @@ int guac_terminal_xterm_palette(guac_terminal* term, unsigned char c);
+  */
+ int guac_terminal_unknown_osc(guac_terminal* term, unsigned char c);
+ 
++/**
++ * Handles OSC 52 (set clipboard): the base64 text after the targets goes to
++ * the terminal's clipboard and is sent to the connected users.
++ */
++int guac_terminal_clipboard_osc(guac_terminal* term, unsigned char c);
++
+ /**
+  * Handles the remaining characters of an Operating System Code (OSC) sequence,
+  * typically initiated with "ESC ]".

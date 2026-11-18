@@ -1,0 +1,566 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>rustguac - Dashboard</title>
+    <link rel="stylesheet" href="/rustguac.css">
+    <style>
+        /* The per-user dashboard: your tmux sessions on your hosts, the
+           ones where Claude waits on you first, an answer box, and your
+           repos. Each host is one SSH login as the entry's user, so a host
+           shows that user's sessions only. "Mine" (the default) asks your
+           own logins; "All users" asks every tmux connection you may open. */
+        #dash { margin-top: var(--s-4); max-width: 1100px; }
+        .d-bar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2); margin-bottom: var(--s-3); }
+        .d-bar .grow { flex: 1; }
+        .chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border: 1px solid var(--border); border-radius: 999px;
+            background: transparent; color: var(--text-muted); font: inherit; font-size: var(--fz-xs); cursor: pointer; }
+        .chip { max-width: 100%; box-sizing: border-box; }
+        .chip .ct { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .chip .ch { color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        #hosts { display: inline-flex; flex-wrap: wrap; gap: 6px; min-width: 0; max-width: 100%; }
+        .opts .btn { max-width: 100%; white-space: normal; text-align: left; overflow-wrap: anywhere; }
+        .seg { display: inline-flex; flex: none; border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+        .seg[hidden] { display: none; }
+        .seg button { padding: 4px 12px; margin: 0; border: 0; border-left: 1px solid var(--border); background: transparent; color: var(--text-muted);
+            font: inherit; font-size: var(--fz-xs); cursor: pointer; }
+        .seg button:first-child { border-left: 0; }
+        .seg button[aria-pressed="true"] { background: var(--accent); color: var(--bg); }
+        .chip[aria-pressed="true"] { color: var(--text); border-color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
+        .btn { padding: 5px 12px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--input); color: var(--text);
+            font: inherit; font-size: var(--fz-xs); cursor: pointer; }
+        .btn:hover { border-color: var(--accent); }
+        .btn.primary { background: var(--accent); color: var(--bg); border-color: var(--accent); }
+        .btn[disabled] { opacity: 0.5; cursor: default; }
+        .muted { color: var(--text-muted); font-size: var(--fz-xs); }
+        .err { color: var(--status-error); font-size: var(--fz-xs); }
+        h2.d-h { font-size: var(--fz-sm); text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); margin: var(--s-4) 0 var(--s-2); }
+        h2.d-h .n { color: var(--text); }
+        .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 480px), 1fr)); gap: var(--s-3); }
+        .card { border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); padding: var(--s-3); min-width: 0; }
+        .card.asking { border-color: var(--status-pending); }
+        .c-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px var(--s-2); }
+        .c-name { font-weight: bold; color: var(--text); overflow-wrap: anywhere; }
+        .c-title { color: var(--text); margin: 4px 0; overflow-wrap: anywhere; }
+        .badge { font-size: 10.5px; line-height: 16px; padding: 1px 6px; border-radius: var(--radius); font-weight: bold; letter-spacing: 0.05em; text-transform: uppercase; }
+        .b-asking { background: var(--status-pending); color: var(--bg); }
+        .b-ready { background: var(--status-active); color: var(--bg); }
+        .b-working { background: var(--input); color: var(--text-muted); border: 1px solid var(--border); }
+        .excerpt { margin: var(--s-2) 0; padding: var(--s-2); background: var(--bg); border-radius: var(--radius); max-height: 260px; overflow: auto;
+            font-size: 12px; line-height: 1.35; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text); }
+        .answer { display: flex; gap: 6px; flex-wrap: wrap; }
+        .answer input { flex: 1; min-width: 0; padding: 6px var(--s-2); background: var(--input); color: var(--text); border: 1px solid var(--border);
+            border-radius: var(--radius); font: inherit; font-size: var(--fz-sm); }
+        .answer input:focus { outline: none; border-color: var(--accent); }
+        .opts { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 6px; }
+        .rows { border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
+        .row { display: flex; align-items: center; gap: var(--s-2); padding: 7px var(--s-3); border-top: 1px solid var(--border); min-width: 0; }
+        .row:first-child { border-top: 0; }
+        .row .main { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .row .meta { color: var(--text-muted); font-size: var(--fz-xs); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 45%; }
+        .rdot { width: 9px; height: 9px; border-radius: 50%; flex: none; box-sizing: border-box; }
+        .rdot.on { background: var(--status-active); }
+        .rdot.off { background: #000; border: 1px solid var(--text-muted); }
+        #repo-q { width: 100%; max-width: 420px; padding: 6px var(--s-2); background: var(--input); color: var(--text); border: 1px solid var(--border);
+            border-radius: var(--radius); font: inherit; font-size: var(--fz-sm); box-sizing: border-box; }
+        .empty-note { padding: var(--s-3); color: var(--text-muted); font-size: var(--fz-sm); }
+        @media (max-width: 600px) { .row .meta { max-width: 40%; } nav { flex-wrap: wrap; } }
+    </style>
+    <script>(function(){var c=localStorage.getItem('rustguac_theme_colors');if(c){try{var o=JSON.parse(c),r=document.documentElement.style;for(var k in o)r.setProperty('--'+k.replace(/_/g,'-'),o[k]);if(o.bg_pattern&&o.bg_pattern!=='none'){var s=document.createElement('style');s.id='bg-pattern-style';s.textContent='body{background-image:'+o.bg_pattern+';background-attachment:fixed}';document.head.appendChild(s)}}catch(e){}}})();</script>
+</head>
+<body>
+    <div class="brand-row">
+        <img id="site-logo" src="/logo.svg" alt="">
+        <h1>rustguac</h1>
+    </div>
+    <nav>
+        <a href="/connections.html">Connections</a>
+        <a href="/dashboard.html" class="active" id="dashboard-link" data-min-role="operator">Dashboard</a>
+        <a href="/sessions.html" id="sessions-link" data-min-role="poweruser">Sessions</a>
+        <a href="/recordings.html">Recordings</a>
+        <a href="/reports.html" id="reports-link" data-min-role="poweruser">Reports</a>
+        <a href="/docs.html">Docs</a>
+        <a href="/tokens.html" id="tokens-link" data-min-role="operator">Tokens</a>
+        <a href="/admin.html" id="admin-link" data-min-role="admin">Admin</a>
+        <a href="/connections.html#my-credentials" id="my-creds-nav" title="Manage your saved credential variables"><span class="nav-key">&#128273;</span> Credentials</a>
+        <span id="user-menu-wrapper"><a href="#" id="logout-item">Logout</a><span id="user-menu-btn" title="Preferences">&#9881; Settings</span><div id="user-menu"><div class="um-section-label">Theme</div><div id="um-theme-list"></div></div></span>
+    </nav>
+
+    <div id="dash">
+        <div class="d-bar">
+            <span class="seg" id="view" role="group" aria-label="Whose sessions" hidden>
+                <button type="button" id="view-mine" aria-pressed="true" title="Only your own sessions">Mine</button>
+                <button type="button" id="view-all" aria-pressed="false" title="The sessions of every user whose connection you may open">All users</button>
+            </span>
+            <span class="muted">Hosts:</span>
+            <span id="hosts"></span>
+            <span class="grow"></span>
+            <span class="muted" id="updated"></span>
+            <button class="btn" id="open-all" type="button" title="Open every running session shown here, as tabs of its host's tmux workspace" disabled>Open all</button>
+            <button class="btn" id="refresh" type="button">&#x21bb; Refresh</button>
+        </div>
+        <div id="msg" class="muted"></div>
+
+        <h2 class="d-h">Waiting on you <span class="n" id="n-waiting"></span></h2>
+        <div id="waiting" class="cards"></div>
+
+        <h2 class="d-h">Working <span class="n" id="n-working"></span></h2>
+        <div id="working" class="rows"></div>
+
+        <h2 class="d-h">Other sessions <span class="n" id="n-other"></span></h2>
+        <div id="other" class="rows"></div>
+
+        <h2 class="d-h">Repos <span class="n" id="n-repos"></span></h2>
+        <p><input id="repo-q" type="search" placeholder="Search repos" aria-label="Search repos" autocomplete="off" spellcheck="false"></p>
+        <div id="repos" class="rows"></div>
+    </div>
+
+    <script>
+        function applyThemeColors(colors){var r=document.documentElement.style;for(var k in colors)r.setProperty('--'+k.replace(/_/g,'-'),colors[k]);var s=document.getElementById('bg-pattern-style');if(!s){s=document.createElement('style');s.id='bg-pattern-style';document.head.appendChild(s)}s.textContent=colors.bg_pattern&&colors.bg_pattern!=='none'?'body{background-image:'+colors.bg_pattern+';background-attachment:fixed}':'';localStorage.setItem('rustguac_theme_colors',JSON.stringify(colors))}
+        var _themePresets={},_adminPreset='aurora';
+        var _themeDescriptions={dark:'Navy & cyan \u2014 the default',light:'Clean white & blue','high-contrast':'Maximum readability',terminal:'Retro green-on-black',nord:'Arctic, muted blues',corporate:'Slate & steel blue',aurora:'Midnight blue with ambient glow',jaguar:'Racing green & gold'};
+        function initTheme(t){if(!t)return;_themePresets=t.presets||{};_adminPreset=t.admin_preset||'aurora';var u=localStorage.getItem('rustguac_theme'),active=u&&_themePresets[u]?u:_adminPreset,colors=(active===_adminPreset)?t.admin_colors:_themePresets[active];if(colors)applyThemeColors(colors);if(t.logo_url){var l=document.getElementById('site-logo');if(l){if(l.src!==t.logo_url&&!l.src.endsWith(t.logo_url))l.src=t.logo_url;l.style.display=''}}var menu=document.getElementById('um-theme-list');if(menu){menu.innerHTML='';Object.keys(_themePresets).forEach(function(name){var item=document.createElement('div');item.className='um-item'+(name===active?' active':'');var sw=document.createElement('span');sw.className='um-swatch';var p=_themePresets[name];sw.style.background='linear-gradient(135deg,'+p.primary+' 50%,'+p.accent+' 50%)';item.appendChild(sw);var info=document.createElement('div');info.className='um-theme-info';var nm=document.createElement('span');nm.className='um-theme-name';nm.textContent=name;info.appendChild(nm);var desc=document.createElement('span');desc.className='um-theme-desc';desc.textContent=_themeDescriptions[name]||'';info.appendChild(desc);item.appendChild(info);item.addEventListener('click',function(){localStorage.setItem('rustguac_theme',name);applyThemeColors(_themePresets[name]);menu.querySelectorAll('.um-item').forEach(function(el){el.classList.remove('active')});item.classList.add('active');document.getElementById('user-menu').style.display='none'});menu.appendChild(item)})}}
+        var _ub=document.getElementById('user-menu-btn');if(_ub)_ub.addEventListener('click',function(e){e.stopPropagation();var m=document.getElementById('user-menu');m.style.display=m.style.display==='block'?'none':'block'});document.addEventListener('click',function(){var m=document.getElementById('user-menu');if(m)m.style.display='none'});
+        fetch('/api/auth/status').then(function(r){return r.json()}).then(function(d){
+            if(d.site_title){document.title=d.site_title+' - Dashboard';document.querySelector('h1').textContent=d.site_title;}
+            initTheme(d.theme);
+        });
+        var apiKey = null;
+        try { apiKey = sessionStorage.getItem('rustguac_api_key'); } catch (e) {}
+        function apiHeaders(extra) {
+            var h = {};
+            if (apiKey) h['Authorization'] = 'Bearer ' + apiKey;
+            if (extra) for (var k in extra) h[k] = extra[k];
+            return h;
+        }
+        document.getElementById('logout-item').addEventListener('click', function () {
+            try { sessionStorage.removeItem('rustguac_api_key'); } catch (e) {}
+            fetch('/auth/logout', { credentials: 'same-origin' }).finally(function () { window.location.href = '/'; });
+        });
+    </script>
+    <script src="/tmux-cmd.js"></script>
+    <script>
+    (function () {
+        'use strict';
+        var roleLevel = { admin: 4, poweruser: 3, operator: 2, viewer: 1 };
+        var NAME_RE = /^[A-Za-z0-9_\-@+=,~]{1,64}$/;
+        var OFF_KEY = 'rg-dash-hosts-off', VIEW_KEY = 'rg-dash-view';
+        var REFRESH_MS = 30000;
+        var targets = [], selected = {}, off = {}, results = {}, cfg = {}, view = 'mine';
+        function $(id) { return document.getElementById(id); }
+        function el(tag, cls, text) { var e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
+        function ago(sec) {
+            var d = Math.max(0, Math.floor(Date.now() / 1000) - sec);
+            if (d < 60) return d + 's ago';
+            if (d < 3600) return Math.floor(d / 60) + 'm ago';
+            if (d < 86400) return Math.floor(d / 3600) + 'h ago';
+            return Math.floor(d / 86400) + 'd ago';
+        }
+        function keyOf(t) { return t.scope + '/' + t.folder + '/' + t.entry + '/' + t.protocol; }
+        function entryUrl(t) {
+            return '/api/addressbook/folders/' + encodeURIComponent(t.scope) + '/' + encodeURIComponent(t.folder) + '/entries/' + encodeURIComponent(t.entry);
+        }
+        function protoQuery(t) { return t.protocol ? '?protocol=' + encodeURIComponent(t.protocol) : ''; }
+        function jsonOf(res) {
+            if (res.status === 401) { location.href = '/auth/login?next=' + encodeURIComponent(location.pathname); return new Promise(function () {}); }
+            return res.json().catch(function () { return {}; }).then(function (j) { return { ok: res.ok, status: res.status, j: j }; });
+        }
+
+        // ── Which hosts: every SSH protocol with tmux on that you can open ──
+        // (the search index is already filtered to your folders).
+        function collectTargets(rows) {
+            var out = [];
+            (rows || []).forEach(function (r) {
+                var e = r.entry || {};
+                var protos = (e.protocols && e.protocols.length) ? e.protocols : [e];
+                protos.forEach(function (p) {
+                    var type = p.session_type || e.session_type;
+                    if (type !== 'ssh' || !(p.tmux || (!e.protocols && e.tmux))) return;
+                    if (p.prompt_credentials || e.prompt_credentials) return;
+                    out.push({
+                        scope: r.scope, folder: r.folder_path, entry: e.name,
+                        protocol: (e.protocols && e.protocols.length) ? (p.protocol || '') : '',
+                        label: p.display_name || e.display_name || e.name,
+                        folderTitle: r.folder_display_name || r.folder_path,
+                        hostname: p.hostname || e.hostname || '',
+                        port: p.port || e.port || 22
+                    });
+                });
+            });
+            return out;
+        }
+        // Whose a connection is. Yours: the entries in your own work bench
+        // folder. Without one (no work bench here, or you have none): the
+        // entries on the work bench host that are not in someone else's
+        // work bench folder, or every entry when there is no work bench.
+        function isMine(t) {
+            if (!cfg.workbench_host) return true;
+            var scope = cfg.workbench_scope || 'shared';
+            if (cfg.my_folder && haveMyFolder) return t.scope === scope && t.folder === cfg.my_folder;
+            if (t.hostname !== cfg.workbench_host) return false;
+            var pre = cfg.workbench_prefix || '';
+            if (pre && t.scope === scope && t.folder.indexOf(pre) === 0 && t.folder !== cfg.my_folder) return false;
+            return true;
+        }
+        var haveMyFolder = false;
+        // "Mine" shows your own; "All users" every connection you may open.
+        // A host switched off by hand stays off in both.
+        function inView(t) { return view === 'all' || isMine(t); }
+        function loadSelection() {
+            haveMyFolder = !!cfg.my_folder && targets.some(function (t) { return t.scope === (cfg.workbench_scope || 'shared') && t.folder === cfg.my_folder; });
+            try { off = JSON.parse(localStorage.getItem(OFF_KEY) || '{}') || {}; } catch (e) { off = {}; }
+            try { if (localStorage.getItem(VIEW_KEY) === 'all') view = 'all'; } catch (e) {}
+            // Nothing but your own to show: no choice to offer.
+            var others = targets.some(function (t) { return !isMine(t); });
+            if (!others) view = 'mine';
+            $('view').hidden = !others;
+            applySelection();
+        }
+        function applySelection() {
+            selected = {};
+            targets.forEach(function (t) { var k = keyOf(t); selected[k] = inView(t) && !off[k]; });
+            $('view-mine').setAttribute('aria-pressed', String(view === 'mine'));
+            $('view-all').setAttribute('aria-pressed', String(view === 'all'));
+        }
+        function saveSelection() { try { localStorage.setItem(OFF_KEY, JSON.stringify(off)); } catch (e) {} }
+        function setView(v) {
+            if (view === v) return;
+            view = v;
+            try { localStorage.setItem(VIEW_KEY, v); } catch (e) {}
+            applySelection();
+            Object.keys(results).forEach(function (k) { if (!selected[k]) delete results[k]; });
+            renderHosts();
+            render();
+            refresh();
+        }
+        $('view-mine').addEventListener('click', function () { setView('mine'); });
+        $('view-all').addEventListener('click', function () { setView('all'); });
+        function renderHosts() {
+            var box = $('hosts');
+            box.innerHTML = '';
+            var shown = targets.filter(inView);
+            if (!shown.length) { box.appendChild(el('span', 'muted', 'none: no connection with tmux sessions is open to you.')); return; }
+            shown.forEach(function (t) {
+                var k = keyOf(t);
+                // The folder says whose it is (a work bench folder carries
+                // its owner's name); the entry says which host.
+                var b = el('button', 'chip');
+                b.appendChild(el('span', 'ct', t.folderTitle));
+                b.appendChild(el('span', 'ch', t.label));
+                b.type = 'button';
+                b.title = t.folderTitle + ' / ' + t.entry + (t.protocol ? ' (' + t.protocol + ')' : '');
+                b.setAttribute('aria-pressed', selected[k] ? 'true' : 'false');
+                b.addEventListener('click', function () {
+                    selected[k] = !selected[k];
+                    if (selected[k]) delete off[k]; else off[k] = true;
+                    saveSelection(); renderHosts();
+                    if (selected[k]) loadHost(t); else { delete results[k]; render(); }
+                });
+                box.appendChild(b);
+            });
+        }
+
+        // ── Asking the hosts ──
+        var inflight = {};
+        function loadHost(t) {
+            var k = keyOf(t);
+            if (inflight[k]) return inflight[k];
+            var p = fetch(entryUrl(t) + '/tmux/dashboard' + protoQuery(t), { headers: apiHeaders(), credentials: 'same-origin' })
+                .then(jsonOf)
+                .then(function (r) { results[k] = r.ok ? { data: r.j } : { error: r.j.error || ('error ' + r.status) }; })
+                .catch(function () { results[k] = { error: 'the host could not be reached' }; })
+                .finally(function () { delete inflight[k]; render(); });
+            inflight[k] = p;
+            return p;
+        }
+        function refresh() {
+            var on = targets.filter(function (t) { return selected[keyOf(t)]; });
+            if (!on.length) { render(); return Promise.resolve(); }
+            $('updated').textContent = 'asking ' + on.length + (on.length === 1 ? ' host' : ' hosts') + '…';
+            return Promise.all(on.map(loadHost)).then(function () { $('updated').textContent = 'updated ' + new Date().toLocaleTimeString(); });
+        }
+
+        // ── Opening a session: the connection's tmux workspace window ──
+        function openSession(t, name) {
+            var w = window.open('', 'rg-tmux:' + t.scope + '/' + t.folder + '/' + t.entry + '/' + t.protocol);
+            if (!w) { $('msg').textContent = 'The browser blocked the tmux workspace window. Allow pop-ups for this site.'; return; }
+            var existing = false;
+            try { existing = w.location.pathname === '/tmux.html'; } catch (e) {}
+            if (existing) { w.postMessage({ rgTmux: 'open', name: name }, location.origin); try { w.focus(); } catch (e) {} return; }
+            w.location.href = '/tmux.html?scope=' + encodeURIComponent(t.scope) + '&folder=' + encodeURIComponent(t.folder) + '&entry=' + encodeURIComponent(t.entry)
+                + (t.protocol ? '&protocol=' + encodeURIComponent(t.protocol) : '')
+                + '&label=' + encodeURIComponent(t.label)
+                + (t.hostname ? '&host=' + encodeURIComponent(t.hostname + (t.port && t.port !== 22 ? ':' + t.port : '')) : '')
+                + '&s=' + encodeURIComponent(name) + '&active=' + encodeURIComponent(name);
+        }
+
+        // Every running session of a host, as tabs of its workspace window.
+        function openSessions(t, names) {
+            if (!names.length) return true;
+            var w = window.open('', 'rg-tmux:' + t.scope + '/' + t.folder + '/' + t.entry + '/' + t.protocol);
+            if (!w) return false;
+            var existing = false;
+            try { existing = w.location.pathname === '/tmux.html'; } catch (e) {}
+            if (existing) {
+                names.forEach(function (n) { w.postMessage({ rgTmux: 'open', name: n }, location.origin); });
+                try { w.focus(); } catch (e) {}
+                return true;
+            }
+            w.location.href = '/tmux.html?scope=' + encodeURIComponent(t.scope) + '&folder=' + encodeURIComponent(t.folder) + '&entry=' + encodeURIComponent(t.entry)
+                + (t.protocol ? '&protocol=' + encodeURIComponent(t.protocol) : '')
+                + '&label=' + encodeURIComponent(t.label)
+                + (t.hostname ? '&host=' + encodeURIComponent(t.hostname + (t.port && t.port !== 22 ? ':' + t.port : '')) : '')
+                + '&s=' + encodeURIComponent(names.join(',')) + '&active=' + encodeURIComponent(names[0]);
+            return true;
+        }
+        // The sessions Open all would open, per host: the running ones the
+        // hosts shown reported, most recently active first. Never the repos.
+        function openable() {
+            var out = [];
+            targets.forEach(function (t) {
+                var r = results[keyOf(t)];
+                if (!selected[keyOf(t)] || !r || !r.data) return;
+                var names = (r.data.sessions || []).filter(function (s) { return s.attachable && NAME_RE.test(s.name); }).map(function (s) { return s.name; });
+                if (names.length) out.push({ t: t, names: names });
+            });
+            return out;
+        }
+        $('open-all').addEventListener('click', function () {
+            var blocked = openable().filter(function (o) { return !openSessions(o.t, o.names); });
+            if (blocked.length) { $('msg').className = 'err'; $('msg').textContent = 'The browser blocked ' + (blocked.length === 1 ? 'a tmux workspace window' : blocked.length + ' tmux workspace windows') + '. Allow pop-ups for this site, then Open all again.'; }
+        });
+
+        // ── Answering ──
+        function send(t, name, text, enter, status) {
+            status.className = 'muted';
+            status.textContent = 'sending…';
+            return fetch(entryUrl(t) + '/tmux/send' + protoQuery(t), {
+                method: 'POST', credentials: 'same-origin',
+                headers: apiHeaders({ 'Content-Type': 'application/json' }),
+                body: JSON.stringify({ session: name, text: text, enter: enter })
+            }).then(jsonOf).then(function (r) {
+                if (!r.ok) { status.className = 'err'; status.textContent = r.j.error || 'not sent'; return false; }
+                status.textContent = 'sent';
+                setTimeout(function () { loadHost(t); }, 2500);
+                return true;
+            }).catch(function () { status.className = 'err'; status.textContent = 'the host could not be reached'; return false; });
+        }
+        // The numbered choices of a prompt ("❯ 1. Yes"), for one-tap answers.
+        function optionsOf(lines) {
+            var out = [];
+            (lines || []).forEach(function (l) {
+                var m = /^[\s│|]*(?:❯\s*)?(\d)\.\s+(.+?)\s*[│|]?\s*$/.exec(l);
+                if (m && out.length < 6 && !out.some(function (o) { return o.n === m[1]; })) out.push({ n: m[1], text: m[2] });
+            });
+            return out;
+        }
+
+        // ── Drawing ──
+        function render() {
+            var waiting = [], working = [], other = [], repos = [], errors = [];
+            targets.forEach(function (t) {
+                var k = keyOf(t);
+                if (!selected[k] || !results[k]) return;
+                var r = results[k];
+                if (r.error) { errors.push(t.label + ': ' + r.error); return; }
+                var d = r.data || {};
+                var repoOf = {};
+                (d.repos || []).forEach(function (rp) {
+                    rp.sessions.forEach(function (n) { if (!repoOf[n]) repoOf[n] = rp.rel; });
+                    repos.push({ t: t, rp: rp, d: d });
+                });
+                (d.sessions || []).forEach(function (s) {
+                    // With everyone's sessions showing, each says whose.
+                    var item = { t: t, s: s, repo: repoOf[s.name] || '', login: d.login, who: view === 'all' ? (d.login || t.folderTitle) : '' };
+                    var st = s.claude && s.claude.state;
+                    if (st === 'asking' || st === 'ready') waiting.push(item);
+                    else if (st === 'working') working.push(item);
+                    else other.push(item);
+                });
+            });
+            // Prompts first, then whatever waited longest.
+            waiting.sort(function (a, b) {
+                var pa = a.s.claude.state === 'asking' ? 0 : 1, pb = b.s.claude.state === 'asking' ? 0 : 1;
+                return pa - pb || (a.s.activity || 0) - (b.s.activity || 0);
+            });
+            $('msg').className = errors.length ? 'err' : 'muted';
+            $('msg').textContent = errors.join(' · ');
+            drawWaiting(waiting);
+            drawRows('working', working, 'Nothing is working right now.');
+            drawRows('other', other, 'No other sessions.');
+            drawRepos(repos);
+            var n = openable().reduce(function (a, o) { return a + o.names.length; }, 0);
+            $('open-all').disabled = !n;
+            $('open-all').textContent = n ? 'Open all (' + n + ')' : 'Open all';
+        }
+        function count(id, n) { $(id).textContent = n ? '(' + n + ')' : ''; }
+        function taskTitle(s) { return (s.title || '').replace(/^[✳✻✽✶✢·*]\s*/, ''); }
+        function drawWaiting(items) {
+            var box = $('waiting');
+            // Keep a half-typed answer across refreshes.
+            var typed = {};
+            box.querySelectorAll('input[data-k]').forEach(function (i) { if (i.value) typed[i.getAttribute('data-k')] = i.value; });
+            var focusK = document.activeElement && document.activeElement.getAttribute && document.activeElement.getAttribute('data-k');
+            box.innerHTML = '';
+            count('n-waiting', items.length);
+            if (!items.length) { box.appendChild(el('div', 'empty-note', 'Nothing is waiting on you.')); return; }
+            items.forEach(function (it) {
+                var s = it.s, t = it.t, st = s.claude.state;
+                var k = keyOf(t) + '#' + s.name;
+                var c = el('div', 'card' + (st === 'asking' ? ' asking' : ''));
+                var head = el('div', 'c-head');
+                head.appendChild(el('span', 'badge b-' + st, st === 'asking' ? 'Asking' : 'Ready'));
+                head.appendChild(el('span', 'c-name', s.name));
+                head.appendChild(el('span', 'muted', [it.who, t.label, it.repo, s.activity ? ago(s.activity) : ''].filter(Boolean).join(' · ')));
+                c.appendChild(head);
+                if (taskTitle(s)) c.appendChild(el('div', 'c-title', taskTitle(s)));
+                if (s.claude.excerpt && s.claude.excerpt.length) c.appendChild(el('pre', 'excerpt', s.claude.excerpt.join('\n')));
+                var status = el('span', 'muted');
+                if (st === 'asking') {
+                    var opts = optionsOf(s.claude.excerpt);
+                    if (opts.length) {
+                        var ob = el('div', 'opts');
+                        opts.forEach(function (o) {
+                            var b = el('button', 'btn', o.n + '. ' + o.text);
+                            b.type = 'button';
+                            b.addEventListener('click', function () { b.disabled = true; send(t, s.name, o.n, false, status).finally(function () { b.disabled = false; }); });
+                            ob.appendChild(b);
+                        });
+                        c.appendChild(ob);
+                    }
+                }
+                var f = el('form', 'answer');
+                var inp = el('input');
+                inp.type = 'text';
+                inp.placeholder = st === 'asking' ? 'Answer, or pick above' : 'Reply to Claude';
+                inp.setAttribute('aria-label', 'Answer for ' + s.name);
+                inp.setAttribute('data-k', k);
+                inp.maxLength = 8192;
+                if (typed[k]) inp.value = typed[k];
+                var sb = el('button', 'btn primary', 'Send'); sb.type = 'submit';
+                var open = el('button', 'btn', 'Open'); open.type = 'button';
+                open.addEventListener('click', function () { openSession(t, s.name); });
+                if (!NAME_RE.test(s.name)) { inp.disabled = true; sb.disabled = true; open.disabled = true; }
+                f.appendChild(inp); f.appendChild(sb); f.appendChild(open);
+                f.addEventListener('submit', function (e) {
+                    e.preventDefault();
+                    var text = inp.value;
+                    if (!text.trim()) { inp.focus(); return; }
+                    sb.disabled = true;
+                    send(t, s.name, text, true, status).then(function (ok) { if (ok) inp.value = ''; }).finally(function () { sb.disabled = false; });
+                });
+                c.appendChild(f);
+                c.appendChild(status);
+                box.appendChild(c);
+                if (focusK === k) inp.focus();
+            });
+        }
+        function drawRows(id, items, empty) {
+            var box = $(id);
+            box.innerHTML = '';
+            count('n-' + id, items.length);
+            if (!items.length) { box.appendChild(el('div', 'empty-note', empty)); return; }
+            items.forEach(function (it) {
+                var s = it.s;
+                var r = el('div', 'row');
+                if (s.claude) r.appendChild(el('span', 'badge b-' + s.claude.state, s.claude.state));
+                var main = el('span', 'main');
+                main.appendChild(el('strong', null, s.name));
+                if (taskTitle(s)) main.appendChild(document.createTextNode('  ' + taskTitle(s)));
+                r.appendChild(main);
+                r.appendChild(el('span', 'meta', [it.who, it.repo || s.path || '', s.command && !s.claude ? s.command : '', it.t.label, s.activity ? ago(s.activity) : ''].filter(Boolean).join(' · ')));
+                var b = el('button', 'btn', 'Open'); b.type = 'button';
+                if (!s.attachable) b.disabled = true;
+                b.addEventListener('click', function () { openSession(it.t, s.name); });
+                r.appendChild(b);
+                box.appendChild(r);
+            });
+        }
+        function freeName(d, base) {
+            var taken = {};
+            (d.sessions || []).forEach(function (s) { taken[s.name] = 1; });
+            if (!taken[base]) return base;
+            for (var i = 2; i < 100; i++) { var n = base.slice(0, 64 - String(i).length - 1) + '-' + i; if (!taken[n]) return n; }
+            return base;
+        }
+        function drawRepos(items) {
+            var box = $('repos');
+            box.innerHTML = '';
+            count('n-repos', items.length);
+            var qs = $('repo-q').value.trim().toLowerCase().split(/\s+/).filter(Boolean);
+            var shown = items.filter(function (it) {
+                var text = (it.rp.rel + ' ' + it.rp.sessions.join(' ') + ' ' + it.t.label).toLowerCase();
+                return qs.every(function (q) { return text.indexOf(q) >= 0; });
+            });
+            if (!items.length) { box.appendChild(el('div', 'empty-note', 'No repos on these hosts.')); return; }
+            if (!shown.length) { box.appendChild(el('div', 'empty-note', 'No repo matches.')); return; }
+            var multi = targets.filter(function (t) { return selected[keyOf(t)]; }).length > 1;
+            shown.forEach(function (it) {
+                var rp = it.rp, on = rp.sessions.length > 0;
+                var r = el('div', 'row');
+                var d = el('span', 'rdot ' + (on ? 'on' : 'off'));
+                d.title = on ? 'A tmux session runs in this folder' : 'No tmux session in this folder';
+                r.appendChild(d);
+                r.appendChild(el('span', 'main', rp.rel));
+                r.appendChild(el('span', 'meta', (on ? rp.sessions.join(', ') : 'no session') + (multi ? ' · ' + (view === 'all' && it.d.login ? it.d.login + ' · ' : '') + it.t.label : '')));
+                var b = el('button', 'btn', on ? 'Open' : 'Start'); b.type = 'button';
+                b.title = rp.path;
+                if (!it.d.installed) b.disabled = true;
+                b.addEventListener('click', function () {
+                    if (on) { openSession(it.t, rp.sessions[0]); return; }
+                    // The startup command: their own, or this console's
+                    // default (tmux-cmd.js).
+                    var name = freeName(it.d, rp.name);
+                    var cmd = rgRepoCommand.expand(rgRepoCommand.template(it.d.default_command), rp, name);
+                    b.disabled = true; b.textContent = 'Starting…';
+                    fetch(entryUrl(it.t) + '/tmux/start' + protoQuery(it.t), {
+                        method: 'POST', credentials: 'same-origin',
+                        headers: apiHeaders({ 'Content-Type': 'application/json' }),
+                        body: JSON.stringify({ sessions: [{ name: name, dir: rp.path, commands: cmd }] })
+                    }).then(jsonOf).then(function (x) {
+                        var st = x.ok && x.j.sessions && x.j.sessions[0];
+                        if (st && (st.state === 'created' || st.state === 'running')) { openSession(it.t, name); loadHost(it.t); return; }
+                        b.disabled = false; b.textContent = 'Start';
+                        $('msg').className = 'err';
+                        $('msg').textContent = rp.rel + ': ' + ((x.j && x.j.error) || (st && st.state === 'no_dir' ? 'the folder is gone' : 'could not start'));
+                    }).catch(function () { b.disabled = false; b.textContent = 'Start'; });
+                });
+                r.appendChild(b);
+                box.appendChild(r);
+            });
+        }
+        $('repo-q').addEventListener('input', render);
+        $('refresh').addEventListener('click', refresh);
+
+        // ── Start ──
+        fetch('/api/me', { headers: apiHeaders(), credentials: 'same-origin' })
+            .then(function (res) {
+                if (res.status === 401 || res.status === 403) { location.href = '/'; return null; }
+                return res.ok ? res.json() : null;
+            })
+            .then(function (me) {
+                if (!me) return;
+                var level = apiKey ? 4 : (roleLevel[me.role] || 0);
+                document.documentElement.setAttribute('data-role-level', String(level));
+                if (level < 2) { location.href = '/connections.html'; return; }
+                return Promise.all([
+                    fetch('/api/dashboard/config', { headers: apiHeaders(), credentials: 'same-origin' }).then(function (r) { return r.ok ? r.json() : {}; }).catch(function () { return {}; }),
+                    fetch('/api/addressbook/search-index', { headers: apiHeaders(), credentials: 'same-origin' }).then(function (r) { return r.ok ? r.json() : { entries: [] }; })
+                ]).then(function (a) {
+                    cfg = a[0] || {};
+                    targets = collectTargets((a[1] || {}).entries);
+                    loadSelection();
+                    renderHosts();
+                    render();
+                    return refresh();
+                });
+            })
+            .catch(function () { $('msg').className = 'err'; $('msg').textContent = 'The dashboard could not load.'; });
+        setInterval(function () { if (!document.hidden) refresh(); }, REFRESH_MS);
+        document.addEventListener('visibilitychange', function () { if (!document.hidden) refresh(); });
+    })();
+    </script>
+    <script src="/search.js"></script>
+</body>
+</html>

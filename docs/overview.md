@@ -91,6 +91,20 @@ SFTP file transfer is available directly between the browser and the target SSH 
 
 Supports optional [multi-hop SSH tunnel chains](#ssh-tunnel--jump-hosts) to reach targets through bastion hosts.
 
+#### tmux sessions
+
+The full guide, with the repo list, startup commands, the Dashboard and work bench folders, is [tmux Workspace and Dashboard](tmux-workspace.md).
+
+Turn on **tmux sessions** on an SSH entry (or on one SSH protocol of a [multi-protocol entry](api.md#multi-protocol-entries)) and the shell can live in a named tmux session on the host instead of in the browser. Close the tab, lose the network, put the laptop to sleep: the session only detaches, and whatever runs in it carries on.
+
+- **Connect** still opens a plain login shell. The **▾** beside it lists the host's tmux sessions, asked of the host each time the menu opens (one SSH login with the entry's stored credentials), with when each was last active and how many clients are attached. Pick one, **Open all**, or type a name to attach to or start.
+- **Advanced** (at the bottom of the menu) starts several sessions at once, each with an optional starting folder and commands typed into it once its shell is up: say, seven sessions each running `claude --continue` in a different project folder. Add rows one by one, or switch to **Edit as text** and paste a batch, one per line: `name "commands"`, `name: commands`, or `name @/folder "commands"`. Commands are only typed into a session this creates; one already running is just opened. Save a batch as a **preset** and it appears in the menu, so the next time it is one click. Presets are kept per user and per connection.
+- Sessions open in the **tmux workspace**: one browser tab per connection, with a tab for each tmux session. The tabs wrap onto more rows when there are many, **Split** shows them all side by side, and picking another session from Connections adds a tab to the workspace already open. Switching tabs gives the keyboard to the session shown, so you can type straight away. Each tab reconnects on its own when the connection drops, waiting longer each time it keeps failing and trying again at once when the browser is back online. When rustguac ends the session instead (its session time limit, an admin), the tab asks the host whether the tmux session is still running and reattaches if it is; if it has ended, the tab says so and offers to start it again. Closing a tab only detaches. rustguac never ends a tmux session: exit it from its own shell.
+- A session opened in a normal tab (the entry prompts for credentials) reconnects on its own too.
+- Without tmux on the host, the menu says so, and a session opened by name explains it in the terminal instead of just closing.
+
+The attach is guacd's SSH `command`: `tmux new-session -A -s <name>` under `sh -c`, so any login shell works. Names are restricted to `A-Z a-z 0-9 _ - @ + = , ~` and checked on the server before any command is built. Everyone who connects to the host as the same Unix account shares its tmux sessions, which also means two people can attach to one session on purpose. guacd's scrollback does not see tmux's history: scroll in tmux (copy mode, or `set -g mouse on`).
+
 ### RDP
 
 Connects guacd to a target RDP server. Supports username/password, domain, and various RDP settings (security mode, certificate ignore, display resize). Drive redirection provides file transfer via a per-session directory on the rustguac server.

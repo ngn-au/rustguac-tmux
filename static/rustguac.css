@@ -1079,7 +1079,9 @@ html:not([data-role-level="4"]) .admin-only { display: none !important; }
     border-radius: 10px;
     box-shadow: 0 24px 70px rgba(0, 0, 0, 0.6);
     overflow: hidden;
-    animation: rg-search-in 140ms ease-out both;
+    /* backwards, not both: a transform held after the animation would make
+       the panel the containing block of the fixed Connect menu inside it. */
+    animation: rg-search-in 140ms ease-out backwards;
 }
 @keyframes rg-search-in { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: none; } }
 #search-overlay-head {
@@ -1174,3 +1176,70 @@ html:not([data-role-level="4"]) .admin-only { display: none !important; }
 .um-kb { padding: 0 var(--s-3) var(--s-2); }
 .um-kb select { width: 100%; }
 .um-kb-hint { margin-top: var(--s-1); font-size: var(--fz-xs); color: var(--text-dim); }
+
+/* The Connect split button and its menu (connect-menu.js): every protocol
+   of an entry, and the tmux sessions of an SSH protocol (#325). On the
+   connections page and in the global search alike. */
+/* Connect split button: Connect and the protocol menu toggle are one
+   control, one border, one height, rounded only on the outer ends. */
+.split-btn { display: inline-flex; vertical-align: middle; }
+.split-btn .btn-connect { margin: 0; }
+.split-btn .split-main { border-top-right-radius: 0; border-bottom-right-radius: 0; }
+.split-btn .split-toggle {
+    min-width: 0; width: 26px; padding: 0; margin-left: 0;
+    border-top-left-radius: 0; border-bottom-left-radius: 0;
+    border-left: 1px solid color-mix(in srgb, var(--bg) 35%, transparent);
+    font-size: var(--fz-sm); line-height: 1;
+}
+.split-btn .split-toggle[aria-expanded="true"] { background: var(--accent-hover); }
+/* The protocol menu: fixed, so the table never clips it, and placed
+   inside the viewport when it opens (connect-menu.js). */
+.proto-menu-list {
+    position: fixed; z-index: 150; min-width: 200px; max-width: calc(100vw - 16px);
+    max-height: calc(100vh - 16px); overflow-y: auto;
+    background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: var(--s-1); box-shadow: 0 8px 28px rgba(0,0,0,.45); text-align: left;
+}
+.proto-menu-list[hidden] { display: none; }
+.proto-item {
+    display: flex; align-items: center; justify-content: flex-start; gap: var(--s-2); width: 100%;
+    padding: 5px var(--s-2); margin: 0; min-width: 0; height: auto;
+    background: transparent; border: 0; border-radius: var(--radius);
+    color: var(--text); font-size: var(--fz-sm); text-align: left; cursor: pointer; white-space: nowrap;
+}
+.proto-item:hover, .proto-item:focus { background: var(--input); outline: none; }
+.proto-item:focus-visible { box-shadow: inset 0 0 0 1px var(--accent); }
+.proto-item .type-badge { font-size: 10.5px; line-height: 16px; padding: 1px 5px; min-width: 44px; letter-spacing: 0.06em; }
+.proto-item .pi-name { overflow: hidden; text-overflow: ellipsis; }
+.proto-item .pi-detail { color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; max-width: 16em; }
+.proto-item .pi-port { color: var(--text-muted); margin-left: auto; padding-left: var(--s-2); font-variant-numeric: tabular-nums; }
+.proto-item .pi-default {
+    font-size: 10px; line-height: 14px; padding: 0 5px; border-radius: 7px;
+    border: 1px solid var(--accent); color: var(--accent); text-transform: uppercase; letter-spacing: 0.06em;
+}
+/* tmux sessions on an SSH protocol (#325), in the Connect menu: asked
+   of the host each time the menu opens. */
+.tmux-section { border-top: 1px solid var(--border); margin-top: var(--s-1); padding-top: var(--s-1); min-width: 300px; }
+.proto-menu-list > .tmux-section:first-child { border-top: 0; margin-top: 0; padding-top: 0; }
+.tmux-head {
+    display: flex; align-items: center; gap: var(--s-2); padding: 3px var(--s-2);
+    color: var(--text-muted); font-size: var(--fz-xs); text-transform: uppercase; letter-spacing: 0.08em;
+}
+.tmux-head .th-port { margin-left: auto; text-transform: none; font-variant-numeric: tabular-nums; }
+.tmux-spin { width: 11px; height: 11px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: tmux-spin 0.8s linear infinite; flex: none; }
+@keyframes tmux-spin { to { transform: rotate(360deg); } }
+.tmux-msg { padding: 3px var(--s-2) 5px; color: var(--text-muted); font-size: var(--fz-xs); white-space: normal; max-width: 340px; }
+.tmux-msg.err { color: var(--status-error); }
+.type-badge.type-tmux { background: var(--type-ssh-bg); color: var(--type-ssh-fg); }
+.proto-item .ti-meta { color: var(--text-muted); font-size: var(--fz-xs); margin-left: auto; padding-left: var(--s-2); }
+.proto-item .ti-meta + .pi-port { margin-left: 0; }
+.tmux-new { display: flex; gap: 4px; padding: 4px var(--s-2) 3px; }
+.tmux-new input {
+    flex: 1; min-width: 0; height: 28px; box-sizing: border-box; padding: 0 var(--s-2); margin: 0;
+    font-family: inherit; font-size: var(--fz-xs); background: var(--input); color: var(--text);
+    border: 1px solid var(--border); border-radius: var(--radius);
+}
+.tmux-new input:focus { outline: none; border-color: var(--accent); }
+.tmux-new button { height: 28px; min-width: 0; padding: 0 var(--s-3); margin: 0; font-size: var(--fz-xs); }
+.type-badge.type-preset { background: transparent; color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.proto-item.tmux-adv .pi-name { color: var(--text-muted); }

@@ -90,6 +90,9 @@ pub struct SshParams {
     pub create_typescript_path: bool,
     /// Terminal font size in points (guacd default: 12).
     pub font_size: Option<u32>,
+    /// Run this instead of a login shell (still on a PTY). Used to attach
+    /// to a tmux session (`crate::tmux::attach_command`).
+    pub command: Option<String>,
     /// Wake-on-LAN parameters.
     pub wol: WolParams,
 }
@@ -459,7 +462,7 @@ pub async fn connect_and_handshake(
                 "read-only" => "false".into(),
                 "locale" => "en_US.UTF-8".into(),
                 "server-alive-interval" => "0".into(),
-                "command" => String::new(),
+                "command" => p.command.clone().unwrap_or_default(),
                 "typescript-path" => p.typescript_path.clone().unwrap_or_default(),
                 "typescript-name" => p.typescript_name.clone().unwrap_or_default(),
                 "create-typescript-path" => if p.create_typescript_path {

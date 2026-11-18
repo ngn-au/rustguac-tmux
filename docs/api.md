@@ -235,6 +235,7 @@ The `jump_hosts` array defines an ordered chain of SSH bastion hops. Each hop co
 | `dpi` | integer | All | Display DPI |
 | `banner` | string | All | Banner message shown before session starts |
 | `ssh_font_size` | integer | SSH | Terminal font size in points (default 12, 6 to 72) |
+| `tmux_session` | string | SSH | Attach to this tmux session on the host instead of a login shell, creating it if needed (see [tmux sessions](#tmux-sessions)) |
 | `wol_send_packet` | boolean | SSH, RDP, VNC | Send a Wake-on-LAN magic packet before connecting |
 | `wol_mac_addr` | string | SSH, RDP, VNC | MAC address to wake (required with `wol_send_packet`) |
 | `wol_broadcast_addr` | string | SSH, RDP, VNC | Broadcast address for the packet (guacd default `255.255.255.255`) |
@@ -551,15 +552,40 @@ Optional body to override or supply credentials at connect time:
   "width": 1920,
   "height": 1080,
   "dpi": 96,
-  "keyboard_layout": "de-ch-qwertz"
+  "keyboard_layout": "de-ch-qwertz",
+  "tmux_session": "deploy"
 }
 ```
+
+`tmux_session` (SSH entries with `tmux` on, see [tmux sessions](#tmux-sessions)) attaches the terminal to the named tmux session on the host instead of a login shell, creating it if it does not exist. Names are 1 to 64 of `A-Z a-z 0-9 _ - @ + = , ~`. An entry without `tmux`, or another session type, answers `400`. The session reports it as `tmux_session` in `GET /api/sessions/:id`.
 
 `keyboard_layout` is the connecting user's own keyboard (**Settings > My keyboard layout** in the UI). It applies to RDP entries with no `server_layout` of their own, and to VDI desktops. A name guacd doesn't know is ignored.
 
 `protocol` picks one of the entry's protocols by name (or by type, when no protocol has that name); without it the primary is used. A protocol the entry does not have answers `404`. The session records the protocol's name as `address_book_protocol`, and so does its recording (`protocol`).
 
 Prompted credentials are used for the current session only and are never stored. Jump host credentials always come from the Vault entry and cannot be overridden at connect time.
+
+### tmux sessions
+
+An SSH protocol with `"tmux": true` offers named tmux sessions on its host (#325). Connect with `tmux_session` (above) to attach to one. These list them, start a batch of them with startup commands, and keep the caller's saved batches (presets), with the same role and folder rules as connect, and an optional `?protocol=` naming which of the entry's protocols. Nothing here ends a session: that is done from the session's own shell.
+
+| Method | Path | Answer |
+|---|---|---|
+| `GET` | `/api/addressbook/folders/:scope/:folder/entries/:entry/tmux` | `{"installed": true, "sessions": [{"name": "deploy", "attached": 1, "windows": 3, "created": 1761400000, "activity": 1761400500, "attachable": true}]}`, most recently active first. `{"installed": false, "sessions": []}` when the host has no tmux |
+| `POST` | `/api/addressbook/folders/:scope/:folder/entries/:entry/tmux/start` | Body `{"sessions": [{"name": "billing", "dir": "/srv/billing", "commands": "claude --continue"}]}`. Answers `{"installed": true, "no_base64": false, "sessions": [{"name": "billing", "state": "created", "commands_sent": true}]}`, in the order asked |
+| `GET` | `/api/addressbook/folders/:scope/:folder/entries/:entry/tmux/repos` | The listing above plus `root` (the repos folder), `repos` (`[{"path", "rel", "name", "sessions": [...]}]`: every git repo under `[tmux] repos_dir`, with the sessions running in each), `other_sessions` and `default_command` (`[tmux] repo_command`) |
+| `GET` | `/api/addressbook/folders/:scope/:folder/entries/:entry/tmux/dashboard` | As `/tmux/repos`, and each session also has `command` and `title` (its active pane) and, where Claude Code runs, `claude`: `{"state": "asking" \| "ready" \| "working", "excerpt": [...]}` read off the screen |
+| `POST` | `/api/addressbook/folders/:scope/:folder/entries/:entry/tmux/send` | Body `{"session": "deploy", "text": "yes", "enter": true}` types an answer into a running session. Never creates one. Audit-logged without the text |
+| `POST` | `/api/addressbook/folders/:scope/:folder/entries/:entry/upload?name=shot.png` | The body is the file (at most 32 MB), saved on the host as the entry's login under `~/.cache/console-uploads/`. Answers `{"path": "..."}` |
+| `GET` | `/api/dashboard/config` | Which connections the dashboard treats as the caller's own (from `[workbench]`) |
+| `GET` | `/api/addressbook/folders/:scope/:folder/entries/:entry/tmux/presets` | `{"presets": [{"name": "fleet", "sessions": [...]}]}`: the caller's own, for this entry protocol |
+| `PUT` | `/api/addressbook/folders/:scope/:folder/entries/:entry/tmux/presets` | Body `{"presets": [...]}` replaces them all; `[]` forgets them. At most 30 |
+
+**Starting sessions.** Up to 20 per call. For each one, the host checks whether a tmux session of that name is running. If it is, it is left exactly as it is, nothing is typed into it, and its `state` is `running`. If not, it is created in `dir` (empty for the login's home; `~/...` is the home too) and `commands` are typed into its shell followed by Enter, once the shell has printed its prompt: `state` `created`, `commands_sent` true. The commands are typed rather than given to tmux as the session's command, so when they exit the shell is still there. A `dir` that does not exist is `no_dir`, and that session is not created. Folders and commands travel to the host base64-encoded, so no quoting is involved; the host needs `base64` (coreutils or busybox), or the answer is `409`. The page then attaches to the sessions as usual. The audit log records the names and states, not the commands. `dir` is at most 1024 characters, `commands` 8192.
+
+**Presets** are stored by rustguac (SQLite), per user and per entry protocol. They hold commands as typed, so keep secrets out of them: use the host's own environment or files instead.
+
+Each call that reaches the host logs in to the host over SSH (through the entry's jump hosts) with the entry's stored credentials and runs one tmux command, so it shows in the host's auth log. An entry that prompts for credentials, or has none stored, answers `409` with `"reason": "no_stored_credentials"`; an unreachable host or failed login, `502`. `attachable` is false for a session whose name has characters outside the set above: it is listed, but rustguac will not pass its name to a shell.
 
 ### `POST /api/addressbook/adhoc/connect`
 

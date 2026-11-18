@@ -2,7 +2,7 @@
 
 use chrono::{DateTime, NaiveDate, NaiveDateTime, TimeZone, Utc};
 use rand::RngExt;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 use std::net::IpAddr;
 use std::path::Path;
@@ -265,7 +265,15 @@ pub fn init_db(path: &Path) -> rusqlite::Result<Db> {
             details    TEXT,
             created_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
-        CREATE INDEX IF NOT EXISTS idx_cli_audit_created ON cli_audit_log(created_at DESC);",
+        CREATE INDEX IF NOT EXISTS idx_cli_audit_created ON cli_audit_log(created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS tmux_presets (
+            owner      TEXT NOT NULL,
+            entry_key  TEXT NOT NULL,
+            presets    TEXT NOT NULL,
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (owner, entry_key)
+        );",
     )?;
 
     // Migration: add oidc_groups column if it doesn't exist
@@ -1324,6 +1332,43 @@ pub fn log_addressbook_event(
     Ok(())
 }
 
+// ── tmux presets ──
+
+/// One user's saved tmux starts for one entry protocol (#325), as the JSON
+/// the API stores. `None` when there are none.
+pub fn get_tmux_presets(db: &Db, owner: &str, entry_key: &str) -> rusqlite::Result<Option<String>> {
+    let conn = db.lock().unwrap();
+    conn.query_row(
+        "SELECT presets FROM tmux_presets WHERE owner = ?1 AND entry_key = ?2",
+        params![owner, entry_key],
+        |r| r.get(0),
+    )
+    .optional()
+}
+
+/// Replace one user's saved tmux starts for one entry protocol; `None`
+/// forgets them.
+pub fn set_tmux_presets(
+    db: &Db,
+    owner: &str,
+    entry_key: &str,
+    presets: Option<&str>,
+) -> rusqlite::Result<()> {
+    let conn = db.lock().unwrap();
+    match presets {
+        Some(p) => conn.execute(
+            "INSERT INTO tmux_presets (owner, entry_key, presets) VALUES (?1, ?2, ?3)
+             ON CONFLICT(owner, entry_key) DO UPDATE SET presets = ?3, updated_at = datetime('now')",
+            params![owner, entry_key, p],
+        )?,
+        None => conn.execute(
+            "DELETE FROM tmux_presets WHERE owner = ?1 AND entry_key = ?2",
+            params![owner, entry_key],
+        )?,
+    };
+    Ok(())
+}
+
 // ── CLI audit log ──
 
 /// Record an administrative action performed through the CLI.
@@ -1757,6 +1802,26 @@ mod tests {
 
     fn test_db() -> Db {
         init_db(std::path::Path::new(":memory:")).unwrap()
+    }
+
+    #[test]
+    fn tmux_presets_are_per_owner_and_entry() {
+        let db = test_db();
+        let k = "shared/ops/web/ssh";
+        assert_eq!(get_tmux_presets(&db, "user:a@x", k).unwrap(), None);
+        set_tmux_presets(&db, "user:a@x", k, Some("[1]")).unwrap();
+        set_tmux_presets(&db, "user:a@x", k, Some("[2]")).unwrap();
+        assert_eq!(
+            get_tmux_presets(&db, "user:a@x", k).unwrap().as_deref(),
+            Some("[2]")
+        );
+        assert_eq!(get_tmux_presets(&db, "user:b@x", k).unwrap(), None);
+        assert_eq!(
+            get_tmux_presets(&db, "user:a@x", "shared/ops/db/ssh").unwrap(),
+            None
+        );
+        set_tmux_presets(&db, "user:a@x", k, None).unwrap();
+        assert_eq!(get_tmux_presets(&db, "user:a@x", k).unwrap(), None);
     }
 
     #[test]

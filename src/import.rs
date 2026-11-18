@@ -178,6 +178,7 @@ pub async fn cmd_import_guacamole(
             auto_open_if_singleton: None,
             fullscreen_on_connect: None,
             autohide_side_tabs: None,
+            tmux: None,
             spice_tls: None,
             spice_tls_port: None,
             spice_ca_cert: None,

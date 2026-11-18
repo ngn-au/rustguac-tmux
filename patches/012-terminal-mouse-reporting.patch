@@ -1,0 +1,218 @@
+diff --git a/src/terminal/terminal-handlers.c b/src/terminal/terminal-handlers.c
+index 552c0306..10401bab 100644
+--- a/src/terminal/terminal-handlers.c
++++ b/src/terminal/terminal-handlers.c
+@@ -554,6 +554,10 @@ static bool* __guac_terminal_get_flag(guac_terminal* term, int num, char private
+         switch (num) {
+             case 1:  return &(term->application_cursor_keys); /* DECCKM */
+             case 25: return &(term->cursor_visible); /* DECTECM */
++            case 1000: return &(term->mouse_report_x11);    /* mouse: buttons */
++            case 1002: return &(term->mouse_report_button); /* mouse: + drag */
++            case 1003: return &(term->mouse_report_any);    /* mouse: all motion */
++            case 1006: return &(term->mouse_report_sgr);    /* mouse: SGR encoding */
+         }
+     }
+ 
+@@ -1058,10 +1062,13 @@ int guac_terminal_csi(guac_terminal* term, unsigned char c) {
+ 
+                 }
+ 
+-                /* Look up flag and set */
+-                flag = __guac_terminal_get_flag(term, argv[0], private_mode_character);
+-                if (flag != NULL)
+-                    *flag = true;
++                /* Look up each flag and set (one sequence may set several,
++                 * e.g. ESC [ ? 1000 ; 1006 h) */
++                for (i = 0; i < argc; i++) {
++                    flag = __guac_terminal_get_flag(term, argv[i], private_mode_character);
++                    if (flag != NULL)
++                        *flag = true;
++                }
+ 
+                 break;
+ 
+@@ -1107,10 +1114,12 @@ int guac_terminal_csi(guac_terminal* term, unsigned char c) {
+                             term->saved_cursor_col);
+                 }
+ 
+-                /* Look up flag and clear */
+-                flag = __guac_terminal_get_flag(term, argv[0], private_mode_character);
+-                if (flag != NULL)
+-                    *flag = false;
++                /* Look up each flag and clear */
++                for (i = 0; i < argc; i++) {
++                    flag = __guac_terminal_get_flag(term, argv[i], private_mode_character);
++                    if (flag != NULL)
++                        *flag = false;
++                }
+ 
+                 break;
+ 
+diff --git a/src/terminal/terminal.c b/src/terminal/terminal.c
+index 6d6dd5a0..b57e41dc 100644
+--- a/src/terminal/terminal.c
++++ b/src/terminal/terminal.c
+@@ -284,6 +284,12 @@ void guac_terminal_reset(guac_terminal* term) {
+     term->text_selected = false;
+     term->selection_committed = false;
+     term->application_cursor_keys = false;
++    term->mouse_report_x11 = false;
++    term->mouse_report_button = false;
++    term->mouse_report_any = false;
++    term->mouse_report_sgr = false;
++    term->mouse_report_col = 0;
++    term->mouse_report_row = 0;
+     term->application_keypad_keys = false;
+     term->automatic_carriage_return = false;
+     term->insert_mode = false;
+@@ -2675,6 +2681,101 @@ static void guac_terminal_triple_click(guac_terminal* terminal, int row, bool ho
+     guac_terminal_select_update(terminal, bottom_row, length - 1, GUAC_TERMINAL_COLUMN_SIDE_RIGHT);
+ }
+ 
++/**
++ * Sends one xterm mouse report to the application: button code `code`
++ * (0-2 buttons, 3 classic release, 64/65 wheel, +32 motion, +4/8/16
++ * Shift/Meta/Ctrl) at the 1-based cell col/row, as SGR when the application
++ * asked for it (`release` picks the final 'm'), else as classic X10 bytes.
++ */
++static int __guac_terminal_mouse_report(guac_terminal* term, int code,
++        int col, int row, bool release) {
++
++    char report[64];
++
++    if (term->mouse_report_sgr) {
++        snprintf(report, sizeof(report), "\x1B[<%i;%i;%i%c",
++                code, col, row, release ? 'm' : 'M');
++        return guac_terminal_send_string(term, report);
++    }
++
++    /* Classic encoding: one byte each, 32 + value, so at most 223 */
++    if (col > 223) col = 223;
++    if (row > 223) row = 223;
++    report[0] = 0x1B; report[1] = '['; report[2] = 'M';
++    report[3] = (char) (32 + (release ? 3 : code));
++    report[4] = (char) (32 + col);
++    report[5] = (char) (32 + row);
++    return guac_terminal_send_data(term, report, 6);
++
++}
++
++/**
++ * Reports mouse input to an application that enabled xterm mouse reporting
++ * (DECSET 1000/1002/1003), e.g. tmux with a pane running Claude Code: button
++ * presses and releases, the wheel (a press of button 64/65, no release), and
++ * motion as the mode asks. x and y are already without the display margin.
++ */
++static int __guac_terminal_report_mouse(guac_terminal* term, int x, int y,
++        int mask, int pressed_mask, int released_mask) {
++
++    int col = x / term->display->char_width + 1;
++    int row = y / term->display->char_height + 1;
++    if (col < 1) col = 1;
++    if (row < 1) row = 1;
++    if (col > term->term_width) col = term->term_width;
++    if (row > term->term_height) row = term->term_height;
++
++    int mods = (term->mod_shift ? 4 : 0) | ((term->mod_meta || term->mod_alt) ? 8 : 0)
++             | (term->mod_ctrl ? 16 : 0);
++
++    static const struct { int mask; int code; } buttons[] = {
++        { GUAC_CLIENT_MOUSE_LEFT,   0 },
++        { GUAC_CLIENT_MOUSE_MIDDLE, 1 },
++        { GUAC_CLIENT_MOUSE_RIGHT,  2 }
++    };
++
++    int result = 0;
++    bool reported = false;
++
++    for (int i = 0; i < 3; i++) {
++        if (pressed_mask & buttons[i].mask) {
++            result |= __guac_terminal_mouse_report(term, buttons[i].code | mods, col, row, false);
++            reported = true;
++        }
++        if (released_mask & buttons[i].mask) {
++            result |= __guac_terminal_mouse_report(term, buttons[i].code | mods, col, row, true);
++            reported = true;
++        }
++    }
++
++    /* The wheel: a press only, as xterm sends it */
++    if (pressed_mask & GUAC_CLIENT_MOUSE_SCROLL_UP) {
++        result |= __guac_terminal_mouse_report(term, 64 | mods, col, row, false);
++        reported = true;
++    }
++    if (pressed_mask & GUAC_CLIENT_MOUSE_SCROLL_DOWN) {
++        result |= __guac_terminal_mouse_report(term, 65 | mods, col, row, false);
++        reported = true;
++    }
++
++    /* Motion to another cell: with a button held (1002 or 1003), or any
++     * motion (1003) */
++    if (!reported && (col != term->mouse_report_col || row != term->mouse_report_row)) {
++        int held = -1;
++        for (int i = 0; i < 3; i++)
++            if (mask & buttons[i].mask) { held = buttons[i].code; break; }
++        if (held >= 0 && (term->mouse_report_button || term->mouse_report_any))
++            result |= __guac_terminal_mouse_report(term, 32 + held + mods, col, row, false);
++        else if (held < 0 && term->mouse_report_any)
++            result |= __guac_terminal_mouse_report(term, 32 + 3 + mods, col, row, false);
++    }
++
++    term->mouse_report_col = col;
++    term->mouse_report_row = row;
++    return result;
++
++}
++
+ static int __guac_terminal_send_mouse(guac_terminal* term, guac_user* user,
+         int x, int y, int mask) {
+ 
+@@ -2720,6 +2821,13 @@ static int __guac_terminal_send_mouse(guac_terminal* term, guac_user* user,
+         guac_terminal_notify(term);
+     }
+ 
++    /* The application asked for the mouse (xterm DECSET 1000/1002/1003):
++     * report to it rather than select or scroll here. Shift keeps the local
++     * behaviour, as in xterm, so text can still be selected and copied. */
++    if ((term->mouse_report_x11 || term->mouse_report_button || term->mouse_report_any)
++            && !term->mod_shift)
++        return __guac_terminal_report_mouse(term, x, y, mask, pressed_mask, released_mask);
++
+     /* Paste contents of clipboard on right or middle mouse button up */
+     if ((released_mask & GUAC_CLIENT_MOUSE_RIGHT) || (released_mask & GUAC_CLIENT_MOUSE_MIDDLE))
+         return guac_terminal_send_data(term, term->clipboard->buffer, term->clipboard->length);
+diff --git a/src/terminal/terminal/terminal-priv.h b/src/terminal/terminal/terminal-priv.h
+index e927c14b..ecfc3e1e 100644
+--- a/src/terminal/terminal/terminal-priv.h
++++ b/src/terminal/terminal/terminal-priv.h
+@@ -412,6 +412,30 @@ struct guac_terminal {
+      */
+     bool application_cursor_keys;
+ 
++    /**
++     * xterm mouse reporting requested by the application: DECSET 1000
++     * (presses and releases), 1002 (also motion while a button is held) and
++     * 1003 (all motion). While any is set, mouse input is reported to the
++     * application instead of selecting text or scrolling the display, unless
++     * Shift is held.
++     */
++    bool mouse_report_x11;
++    bool mouse_report_button;
++    bool mouse_report_any;
++
++    /**
++     * Whether mouse reports use the SGR encoding (DECSET 1006) rather than
++     * the classic X10 bytes.
++     */
++    bool mouse_report_sgr;
++
++    /**
++     * The character cell (1-based) of the last motion report, so motion is
++     * reported only when the pointer moves to another cell.
++     */
++    int mouse_report_col;
++    int mouse_report_row;
++
+     /**
+      * Whether the keypad numeric keys should send numeric characters (DECKPNM)
+      * or application/alternate sequences (DECKPAM).

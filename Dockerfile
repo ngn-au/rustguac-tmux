@@ -156,8 +156,9 @@ RUN mkdir -p /etc/chromium/policies/managed && \
 # Create non-root user with a real home directory (Chromium crashpad needs it)
 RUN groupadd -r rustguac && useradd -r -g rustguac -m -d /home/rustguac -s /bin/sh rustguac
 
-# Generate self-signed cert for guacd TLS (internal loopback encryption)
-RUN /opt/rustguac/bin/rustguac generate-cert --hostname localhost --out-dir /opt/rustguac/tls
+# No guacd TLS key at build time: a key baked here would be the same in
+# every container and readable by anyone who can pull the image. entrypoint.sh
+# generates the pair on first start unless one is mounted.
 
 # Default config template (copied to config.toml on first run if not mounted)
 RUN cat > /opt/rustguac/config.toml.default <<'EOF'

@@ -319,78 +319,16 @@ pub fn shutdown_chain(tunnels: &[SshTunnel]) {
 /// Start an SSH tunnel. Returns the tunnel handle with the local address.
 pub async fn start(config: TunnelConfig, hop_index: usize) -> Result<SshTunnel, TunnelError> {
     let jump_addr = format!("{}:{}", config.jump_host, config.jump_port);
-
-    // Connect to the jump host
-    let ssh_config = Arc::new(client::Config {
-        inactivity_timeout: Some(std::time::Duration::from_secs(300)),
-        keepalive_interval: Some(std::time::Duration::from_secs(30)),
-        ..Default::default()
-    });
-
-    let handler = TunnelHandler {
-        expected_key: config.expected_host_key,
+    let handle = connect_authenticated(
+        &config.jump_host,
+        config.jump_port,
+        &config.jump_username,
+        config.jump_password.as_deref(),
+        config.jump_private_key.as_deref(),
+        config.expected_host_key,
         hop_index,
-        jump_host: jump_addr.clone(),
-    };
-
-    let mut handle = tokio::time::timeout(
-        std::time::Duration::from_secs(15),
-        client::connect(ssh_config, &jump_addr, handler),
     )
-    .await
-    .map_err(|_| {
-        TunnelError::Ssh(
-            hop_index,
-            format!("timeout connecting to jump host {}", jump_addr),
-        )
-    })?
-    .map_err(|e| {
-        TunnelError::Ssh(
-            hop_index,
-            format!("failed to connect to jump host {}: {}", jump_addr, e),
-        )
-    })?;
-
-    tracing::debug!(hop = hop_index, "SSH connected to jump host {}", jump_addr);
-
-    // Authenticate: try private key first, then password
-    let auth_result = if let Some(ref key_pem) = config.jump_private_key {
-        let private_key = russh::keys::decode_secret_key(key_pem, None).map_err(|e| {
-            TunnelError::Key(hop_index, format!("failed to decode private key: {}", e))
-        })?;
-        let key = PrivateKeyWithHashAlg::new(Arc::new(private_key), None);
-        handle
-            .authenticate_publickey(&config.jump_username, key)
-            .await
-            .map_err(|e| TunnelError::Auth(hop_index, format!("public key auth error: {}", e)))?
-    } else if let Some(ref password) = config.jump_password {
-        handle
-            .authenticate_password(&config.jump_username, password)
-            .await
-            .map_err(|e| TunnelError::Auth(hop_index, format!("password auth error: {}", e)))?
-    } else {
-        return Err(TunnelError::Auth(
-            hop_index,
-            "no password or private key provided for jump host".into(),
-        ));
-    };
-
-    if !auth_result.success() {
-        return Err(TunnelError::Auth(
-            hop_index,
-            format!(
-                "authentication failed for {}@{}",
-                config.jump_username, jump_addr
-            ),
-        ));
-    }
-
-    tracing::debug!(
-        hop = hop_index,
-        "SSH authenticated to jump host {} as {}",
-        jump_addr,
-        config.jump_username
-    );
+    .await?;
 
     // Bind a local TCP listener on an OS-assigned port
     let listener = TcpListener::bind("127.0.0.1:0").await.map_err(|e| {
@@ -422,6 +360,206 @@ pub async fn start(config: TunnelConfig, hop_index: usize) -> Result<SshTunnel, 
         cancel,
         _join_handle: join_handle,
     })
+}
+
+/// Connect to an SSH server, check its host key against `expected_host_key`
+/// (accepted on trust, with a warning, when there is none) and log in, with
+/// the private key when there is one, otherwise the password. `hop_index`
+/// only labels errors and logs.
+async fn connect_authenticated(
+    host: &str,
+    port: u16,
+    username: &str,
+    password: Option<&str>,
+    private_key: Option<&str>,
+    expected_host_key: Option<String>,
+    hop_index: usize,
+) -> Result<client::Handle<TunnelHandler>, TunnelError> {
+    let jump_addr = format!("{}:{}", host, port);
+
+    let ssh_config = Arc::new(client::Config {
+        inactivity_timeout: Some(std::time::Duration::from_secs(300)),
+        keepalive_interval: Some(std::time::Duration::from_secs(30)),
+        ..Default::default()
+    });
+
+    let handler = TunnelHandler {
+        expected_key: expected_host_key,
+        hop_index,
+        jump_host: jump_addr.clone(),
+    };
+
+    let mut handle = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        client::connect(ssh_config, &jump_addr, handler),
+    )
+    .await
+    .map_err(|_| TunnelError::Ssh(hop_index, format!("timeout connecting to {}", jump_addr)))?
+    .map_err(|e| {
+        TunnelError::Ssh(
+            hop_index,
+            format!("failed to connect to {}: {}", jump_addr, e),
+        )
+    })?;
+
+    tracing::debug!(hop = hop_index, "SSH connected to jump host {}", jump_addr);
+
+    // Authenticate: try private key first, then password
+    let auth_result = if let Some(key_pem) = private_key.filter(|k| !k.is_empty()) {
+        let private_key = russh::keys::decode_secret_key(key_pem, None).map_err(|e| {
+            TunnelError::Key(hop_index, format!("failed to decode private key: {}", e))
+        })?;
+        let key = PrivateKeyWithHashAlg::new(Arc::new(private_key), None);
+        handle
+            .authenticate_publickey(username, key)
+            .await
+            .map_err(|e| TunnelError::Auth(hop_index, format!("public key auth error: {}", e)))?
+    } else if let Some(password) = password {
+        handle
+            .authenticate_password(username, password)
+            .await
+            .map_err(|e| TunnelError::Auth(hop_index, format!("password auth error: {}", e)))?
+    } else {
+        return Err(TunnelError::Auth(
+            hop_index,
+            "no password or private key to log in with".into(),
+        ));
+    };
+
+    if !auth_result.success() {
+        return Err(TunnelError::Auth(
+            hop_index,
+            format!("authentication failed for {}@{}", username, jump_addr),
+        ));
+    }
+
+    tracing::debug!(
+        hop = hop_index,
+        "SSH authenticated to jump host {} as {}",
+        jump_addr,
+        username
+    );
+    Ok(handle)
+}
+
+/// Where and how to log in for [`run_command`].
+pub struct CommandTarget<'a> {
+    pub hostname: &'a str,
+    pub port: u16,
+    pub username: &'a str,
+    pub password: Option<&'a str>,
+    pub private_key: Option<&'a str>,
+    /// Reached through these, in order, as a session's tunnel chain is.
+    pub jump_hosts: &'a [JumpHost],
+}
+
+/// What a command run with [`run_command`] printed, and how it exited.
+#[derive(Debug)]
+pub struct CommandOutput {
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_status: Option<u32>,
+}
+
+/// Longest output kept from [`run_command`]; the rest is dropped.
+const MAX_COMMAND_OUTPUT: usize = 256 * 1024;
+
+/// Log in to `target` (through its jump hosts) and run one command on an
+/// exec channel, without a PTY, within `timeout`. For short commands that
+/// rustguac runs itself, such as listing tmux sessions (`crate::tmux`); the
+/// interactive terminal is always guacd's.
+///
+/// The target has no pinned host key, so like a session's own connection it
+/// is accepted on trust; jump hosts are checked against theirs. The error
+/// says which step failed, in words for the user.
+pub async fn run_command(
+    target: CommandTarget<'_>,
+    command: &str,
+    timeout: std::time::Duration,
+) -> Result<CommandOutput, String> {
+    run_command_input(target, command, None, timeout).await
+}
+
+/// [`run_command`], with `input` sent to the command's stdin and then EOF
+/// (the console's file uploads).
+pub async fn run_command_input(
+    target: CommandTarget<'_>,
+    command: &str,
+    input: Option<&[u8]>,
+    timeout: std::time::Duration,
+) -> Result<CommandOutput, String> {
+    let hops = target.jump_hosts.len();
+    tokio::time::timeout(timeout, async {
+        // The chain stays up, in `_tunnels`, until the command is done.
+        let (_tunnels, host, port) = if hops == 0 {
+            (Vec::new(), target.hostname.to_string(), target.port)
+        } else {
+            let (tunnels, addr) = start_chain(target.jump_hosts, target.hostname, target.port)
+                .await
+                .map_err(|e| format!("jump host {e}"))?;
+            (tunnels, addr.ip().to_string(), addr.port())
+        };
+        let handle = connect_authenticated(
+            &host,
+            port,
+            target.username,
+            target.password,
+            target.private_key,
+            None,
+            hops,
+        )
+        .await
+        .map_err(|e| match e {
+            TunnelError::Auth(_, m) => format!("login refused: {m}"),
+            TunnelError::Key(_, m) => format!("private key: {m}"),
+            TunnelError::Ssh(_, m) | TunnelError::Bind(_, m) => m,
+        })?;
+        let mut channel = handle
+            .channel_open_session()
+            .await
+            .map_err(|e| format!("failed to open a channel: {e}"))?;
+        channel
+            .exec(true, command)
+            .await
+            .map_err(|e| format!("failed to run the command: {e}"))?;
+        if let Some(input) = input {
+            channel
+                .data(input)
+                .await
+                .map_err(|e| format!("failed to send the data: {e}"))?;
+            channel
+                .eof()
+                .await
+                .map_err(|e| format!("failed to send the data: {e}"))?;
+        }
+        let (mut stdout, mut stderr, mut exit_status) = (Vec::new(), Vec::new(), None);
+        while let Some(msg) = channel.wait().await {
+            match msg {
+                russh::ChannelMsg::Data { ref data } => {
+                    if stdout.len() < MAX_COMMAND_OUTPUT {
+                        stdout.extend_from_slice(data);
+                    }
+                }
+                russh::ChannelMsg::ExtendedData { ref data, .. } => {
+                    if stderr.len() < MAX_COMMAND_OUTPUT {
+                        stderr.extend_from_slice(data);
+                    }
+                }
+                russh::ChannelMsg::ExitStatus { exit_status: s } => exit_status = Some(s),
+                _ => {}
+            }
+        }
+        let _ = handle
+            .disconnect(russh::Disconnect::ByApplication, "", "")
+            .await;
+        Ok(CommandOutput {
+            stdout: String::from_utf8_lossy(&stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&stderr).into_owned(),
+            exit_status,
+        })
+    })
+    .await
+    .map_err(|_| format!("timed out after {}s", timeout.as_secs()))?
 }
 
 /// Background task: accept TCP connections and bridge through SSH channels.

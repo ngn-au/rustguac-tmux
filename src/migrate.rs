@@ -216,7 +216,7 @@ pub async fn cmd_vault_migrate(
 /// Resolve a named backend (`vault` / `vault_shared` / `vault_local`) from
 /// config, read its secret ID from the matching env var, and connect. Exits
 /// the process with a clear message on any misconfiguration.
-async fn connect_named(config: &Config, name: &str) -> Arc<VaultClient> {
+pub(crate) async fn connect_named(config: &Config, name: &str) -> Arc<VaultClient> {
     let (vault_config, env_var) = match name {
         "vault" => (config.vault.as_ref(), "VAULT_SECRET_ID"),
         "vault_shared" => (config.vault_shared.as_ref(), "VAULT_SHARED_SECRET_ID"),
