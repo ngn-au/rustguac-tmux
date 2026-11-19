@@ -121,7 +121,14 @@ test("the console's default startup command names Claude after the repo, until y
     await page.goto('/tmux.html?scope=shared&folder=acme&entry=bench&protocol=ssh&label=bench');
     const cmd = page.locator('#repo-cmd-in'), reset = page.locator('#repo-cmd-reset');
     const rows = page.locator('#repo-list .pop-item');
-    const start = async (text) => { if (await page.locator('#add-pop').isHidden()) await page.locator('#btn-add').click(); await rows.filter({ hasText: text }).click(); };
+    // A started session closes the popover once the host answers; wait for
+    // that, or the next start races it and clicks a row as it disappears.
+    const pop = page.locator('#add-pop');
+    const start = async (text) => {
+        if (await pop.isHidden()) await page.locator('#btn-add').click();
+        await rows.filter({ hasText: text }).click();
+        await expect(pop).toBeHidden();
+    };
     // The default shows in the box, and is not stored as the person's own.
     await expect(cmd).toHaveValue('claude -n {repo}');
     await expect(reset).toBeHidden();

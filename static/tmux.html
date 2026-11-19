@@ -59,6 +59,13 @@
         }
         .tab-x:hover { background: var(--input); color: var(--text); }
         #tools { display: flex; gap: 4px; flex: none; align-items: center; }
+        /* A phone: the bar's buttons and the tabs do not fit on one row, so
+           the tabs take a row of their own under the buttons. */
+        @media (max-width: 640px) {
+            #bar { flex-wrap: wrap; }
+            #who { flex: 1; max-width: none; }
+            #tabs { order: 3; flex-basis: 100%; }
+        }
 
         /* Panes. Tabs: every pane fills the area and only the active one is
            shown (hidden panes keep their size, so a session never resizes
