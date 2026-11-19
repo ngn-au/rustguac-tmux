@@ -1,15 +1,27 @@
-# rustguac
+# rustguac-tmux
 
-[![CI](https://github.com/sol1/rustguac/actions/workflows/ci.yml/badge.svg)](https://github.com/sol1/rustguac/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/sol1/rustguac)](https://github.com/sol1/rustguac/releases/latest)
-[![License](https://img.shields.io/github/license/sol1/rustguac)](LICENSE)
-[![Docker](https://img.shields.io/docker/pulls/sol1/rustguac)](https://hub.docker.com/r/sol1/rustguac)
+[![License](https://img.shields.io/github/license/ngn-au/rustguac-tmux)](LICENSE)
+[![Built on rustguac](https://img.shields.io/badge/built%20on-sol1%2Frustguac-blue)](https://github.com/sol1/rustguac)
 
-A lightweight Rust replacement for the Apache Guacamole Java webapp. Browser-based SSH, RDP, VNC, SPICE, Proxmox VE consoles, web browsing, and VDI desktop containers through [guacd](https://github.com/apache/guacamole-server).
+**rustguac-tmux** is [rustguac](https://github.com/sol1/rustguac) with a tmux workspace and a per-user dashboard on top: SSH sessions that live in named tmux sessions on the host and open in the browser as tabs that reconnect on their own, a list of your git repos with one-click sessions and a startup command (for example Claude Code named after the repo), a dashboard of the sessions waiting on you, and terminal fixes for mouse scrolling, clipboard, Mac keys and pasted images. See [tmux Workspace and Dashboard](docs/tmux-workspace.md).
+
+> **Standing on the shoulders of rustguac.** Everything else here, the Rust Guacamole proxy, the session types, Vault connections, OIDC, recordings, VDI and the guacd patch set, is the work of [Sol1](https://www.sol1.com.au), Dave Kempe and the [rustguac contributors](https://github.com/sol1/rustguac/graphs/contributors). The full upstream history is kept in this repository. If you do not need the tmux workspace, use [sol1/rustguac](https://github.com/sol1/rustguac) directly; general fixes made here are offered upstream.
+
+rustguac is a lightweight Rust replacement for the Apache Guacamole Java webapp. Browser-based SSH, RDP, VNC, SPICE, Proxmox VE consoles, web browsing, and VDI desktop containers through [guacd](https://github.com/apache/guacamole-server).
 
 No Java. No Tomcat. Single binary + guacd.
 
-> **This fork** adds a tmux workspace and a per-user dashboard to [sol1/rustguac](https://github.com/sol1/rustguac): SSH sessions that live in named tmux sessions on the host and open as tabs that reconnect on their own, a list of your git repos with one-click sessions and a startup command (for example Claude Code named after the repo), a dashboard of the sessions waiting on you, and terminal fixes for mouse scrolling, clipboard, Mac keys and pasted images. See [tmux Workspace and Dashboard](docs/tmux-workspace.md).
+### What rustguac-tmux adds
+
+- **tmux sessions on SSH entries**: the Connect menu lists the host's tmux sessions; the workspace (`tmux.html`) holds them as tabs, or side by side, and each tab reconnects by itself. rustguac never kills a tmux session.
+- **Advanced start**: a batch of sessions with startup commands, with presets per user.
+- **Repo list**: the git repos under a folder of the login's home, one click to start a session in a repo with a configurable startup command (`[tmux] repos_dir`, `repo_command`).
+- **Dashboard**: your sessions across hosts, the ones waiting on you first (for example Claude Code asking a question), with one-tap answers. Mine / All users, Open all.
+- **Work bench folders** (`[workbench]`): a folder, SSH entry and console-only key for every member of a Unix group on a shared host.
+- **Terminal**: xterm mouse reporting and OSC 52 copy in guacd (patches 012, 013), Mac editing keys, Cmd+C / Cmd+V, pasted images and dropped files.
+- **Entries with several protocols** (also proposed upstream as [sol1/rustguac#299](https://github.com/sol1/rustguac/pull/299)).
+
+It is based on rustguac v1.13.4 and is a drop-in replacement: same binary name, config file and data layout.
 
 ## Architecture
 
@@ -104,9 +116,11 @@ The client runs in any modern browser (Chrome, Firefox, Edge, Safari, Chromium, 
 
 ## Quick start
 
+> The pre-built packages and images below are **upstream rustguac** and do not include the tmux workspace. For rustguac-tmux, build from source: `docker build -t rustguac-tmux .`, `./build-deb.sh`, or `sudo ./install.sh` (see [Other distributions](#other-distributions) and the [Installation guide](docs/installation.md)). The commands are otherwise the same.
+
 ### Debian 13 (.deb)
 
-Pre-built packages for amd64 and arm64 are available from [Releases](https://github.com/sol1/rustguac/releases):
+Pre-built upstream packages for amd64 and arm64 are available from [sol1/rustguac Releases](https://github.com/sol1/rustguac/releases):
 
 ```bash
 sudo apt install ./rustguac_*.deb
@@ -181,10 +195,14 @@ Add `[vdi]` to your config and create a VDI entry in the connections. See [VDI D
 - [API Reference](docs/api.md): REST API endpoints, the session connection flow, and headless ws-ticket integration
 - [Migration from Apache Guacamole](docs/migration.md): MySQL/MariaDB to Vault
 
+## Credits
+
+rustguac was created by [Sol1](https://www.sol1.com.au) (Dave Kempe) with contributions from the [rustguac community](https://github.com/sol1/rustguac/graphs/contributors). rustguac-tmux is maintained by [NGN](https://ngn.au) ([@jseifeddine](https://github.com/jseifeddine)). guacd comes from [Apache Guacamole](https://guacamole.apache.org).
+
 ## Commercial support
 
-Commercial support for rustguac is available from [Sol1](https://www.sol1.com.au).
+Commercial support for upstream rustguac is available from [Sol1](https://www.sol1.com.au). Please report issues with the tmux workspace, dashboard or work bench here, not upstream.
 
 ## License
 
-Apache License 2.0. See [LICENSE](LICENSE) for details.
+Apache License 2.0, as upstream. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
